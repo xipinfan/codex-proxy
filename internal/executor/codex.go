@@ -456,6 +456,7 @@ func (e *Executor) ExecuteResponsesCompactStream(ctx context.Context, account *a
 	/* Responses API 格式已经很接近 Codex 格式，使用通用转换器处理 */
 	codexBody := translator.ConvertOpenAIRequestToCodex(baseModel, body, true)
 	codexBody, _ = sjson.SetBytes(codexBody, "model", baseModel)
+	codexBody, _ = sjson.DeleteBytes(codexBody, "stream")
 	codexBody, _ = sjson.DeleteBytes(codexBody, "previous_response_id")
 	codexBody, _ = sjson.DeleteBytes(codexBody, "prompt_cache_retention")
 	codexBody, _ = sjson.DeleteBytes(codexBody, "safety_identifier")
@@ -537,6 +538,7 @@ func (e *Executor) ExecuteResponsesCompactNonStream(ctx context.Context, account
 	/* 转换请求格式 */
 	codexBody := translator.ConvertOpenAIRequestToCodex(baseModel, body, false)
 	codexBody, _ = sjson.SetBytes(codexBody, "model", baseModel)
+	codexBody, _ = sjson.DeleteBytes(codexBody, "stream")
 	codexBody, _ = sjson.DeleteBytes(codexBody, "previous_response_id")
 	codexBody, _ = sjson.DeleteBytes(codexBody, "prompt_cache_retention")
 	codexBody, _ = sjson.DeleteBytes(codexBody, "safety_identifier")

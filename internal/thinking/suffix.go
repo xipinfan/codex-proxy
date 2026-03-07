@@ -47,10 +47,6 @@ var knownBaseModels = map[string]bool{
 	"gpt-5.3-codex": true, "gpt-5.3-codex-spark": true,
 	/* GPT-5.4 */
 	"gpt-5.4": true,
-	/* GPT-4.1 系列 */
-	"gpt-4.1": true, "gpt-4.1-mini": true, "gpt-4.1-nano": true,
-	/* o 系列 */
-	"o3": true, "o4-mini": true,
 	/* 旧版兼容 */
 	"codex-mini": true,
 }
