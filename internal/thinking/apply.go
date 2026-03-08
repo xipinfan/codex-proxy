@@ -67,9 +67,10 @@ func ApplyThinking(body []byte, model string) ([]byte, string) {
 
 /**
  * extractConfigFromBody 从请求体中提取思考配置
- * 支持多种格式：
- *   - OpenAI: reasoning_effort
+ * 支持多种格式（按优先级）：
  *   - Codex: reasoning.effort
+ *   - OpenAI: reasoning_effort
+ *   - OpenWork 等客户端: variant（作为 reasoning_effort 的备选）
  *
  * @param body - 请求体 JSON
  * @returns ThinkingConfig - 提取的思考配置
@@ -93,6 +94,21 @@ func extractConfigFromBody(body []byte) ThinkingConfig {
 	/* 检查 OpenAI 格式 reasoning_effort */
 	if effort := gjson.GetBytes(body, "reasoning_effort"); effort.Exists() {
 		value := strings.ToLower(strings.TrimSpace(effort.String()))
+		if value == "none" {
+			return ThinkingConfig{Mode: ModeNone, Budget: 0}
+		}
+		if value != "" {
+			return ThinkingConfig{Mode: ModeLevel, Level: ThinkingLevel(value)}
+		}
+	}
+
+	/*
+	 * 检查 variant 参数（OpenWork 等客户端使用）
+	 * variant 原用于 Claude 模型的思考级别，这里作为 reasoning_effort 的备选
+	 * 参考 issue #258
+	 */
+	if variant := gjson.GetBytes(body, "variant"); variant.Exists() {
+		value := strings.ToLower(strings.TrimSpace(variant.String()))
 		if value == "none" {
 			return ThinkingConfig{Mode: ModeNone, Budget: 0}
 		}

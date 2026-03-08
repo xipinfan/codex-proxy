@@ -27,12 +27,12 @@ var dataPrefix = []byte("data:")
  * @field HasToolCallAnnounced - 是否已发送过工具调用通知
  */
 type StreamState struct {
-	ResponseID            string
-	CreatedAt             int64
-	Model                 string
-	FunctionCallIndex     int
-	HasReceivedArgsDelta  bool
-	HasToolCallAnnounced  bool
+	ResponseID           string
+	CreatedAt            int64
+	Model                string
+	FunctionCallIndex    int
+	HasReceivedArgsDelta bool
+	HasToolCallAnnounced bool
 }
 
 /**
@@ -102,6 +102,13 @@ func ConvertStreamChunk(_ context.Context, rawLine []byte, state *StreamState, r
 		}
 		if v := usage.Get("input_tokens"); v.Exists() {
 			tpl, _ = sjson.Set(tpl, "usage.prompt_tokens", v.Int())
+		}
+		/* 透传 cached_tokens 和 reasoning_tokens 细分信息（issue #391） */
+		if v := usage.Get("input_tokens_details.cached_tokens"); v.Exists() {
+			tpl, _ = sjson.Set(tpl, "usage.prompt_tokens_details.cached_tokens", v.Int())
+		}
+		if v := usage.Get("output_tokens_details.reasoning_tokens"); v.Exists() {
+			tpl, _ = sjson.Set(tpl, "usage.completion_tokens_details.reasoning_tokens", v.Int())
 		}
 	}
 
@@ -239,6 +246,13 @@ func ConvertNonStreamResponse(_ context.Context, rawJSON []byte, reverseToolMap 
 		}
 		if v := usage.Get("input_tokens"); v.Exists() {
 			tpl, _ = sjson.Set(tpl, "usage.prompt_tokens", v.Int())
+		}
+		/* 透传 cached_tokens 和 reasoning_tokens 细分信息（issue #391） */
+		if v := usage.Get("input_tokens_details.cached_tokens"); v.Exists() {
+			tpl, _ = sjson.Set(tpl, "usage.prompt_tokens_details.cached_tokens", v.Int())
+		}
+		if v := usage.Get("output_tokens_details.reasoning_tokens"); v.Exists() {
+			tpl, _ = sjson.Set(tpl, "usage.completion_tokens_details.reasoning_tokens", v.Int())
 		}
 	}
 

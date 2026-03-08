@@ -15,12 +15,38 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"regexp"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
+
+/**
+ * Claude tool_use ID 清理
+ * Claude 要求 tool_use.id 必须匹配 ^[a-zA-Z0-9_-]+$
+ * Codex 返回的 call_id 可能包含不符合规范的字符（如冒号等）
+ */
+var (
+	claudeToolUseIDSanitizer = regexp.MustCompile(`[^a-zA-Z0-9_-]`)
+	claudeToolUseIDCounter   uint64
+)
+
+/**
+ * sanitizeClaudeToolID 确保 tool_use ID 符合 Claude 的正则要求
+ * 将不符合规范的字符替换为 '_'，空结果使用生成的备用值
+ * @param id - 原始 tool_use ID
+ * @returns string - 清理后的 ID
+ */
+func sanitizeClaudeToolID(id string) string {
+	s := claudeToolUseIDSanitizer.ReplaceAllString(id, "_")
+	if s == "" {
+		s = fmt.Sprintf("toolu_%d_%d", time.Now().UnixNano(), atomic.AddUint64(&claudeToolUseIDCounter, 1))
+	}
+	return s
+}
 
 /**
  * ConvertClaudeRequestToOpenAI 将 Claude Messages API 请求转换为 OpenAI Chat Completions 格式
@@ -366,7 +392,7 @@ func ConvertCodexStreamToClaudeEvents(_ context.Context, rawLine []byte, state *
 		blockStart, _ = sjson.Set(blockStart, "index", state.ContentBlockIndex)
 		block := `{}`
 		block, _ = sjson.Set(block, "type", "tool_use")
-		block, _ = sjson.Set(block, "id", item.Get("call_id").String())
+		block, _ = sjson.Set(block, "id", sanitizeClaudeToolID(item.Get("call_id").String()))
 		block, _ = sjson.Set(block, "name", item.Get("name").String())
 		block, _ = sjson.SetRaw(block, "input", `{}`)
 		blockStart, _ = sjson.SetRaw(blockStart, "content_block", block)
@@ -476,7 +502,7 @@ func ConvertCodexNonStreamToClaudeResponse(_ context.Context, rawJSON []byte, mo
 				stopReason = "tool_use"
 				block := `{}`
 				block, _ = sjson.Set(block, "type", "tool_use")
-				block, _ = sjson.Set(block, "id", item.Get("call_id").String())
+				block, _ = sjson.Set(block, "id", sanitizeClaudeToolID(item.Get("call_id").String()))
 				block, _ = sjson.Set(block, "name", item.Get("name").String())
 				if args := item.Get("arguments"); args.Exists() {
 					out, _ = sjson.SetRaw(out, "content.-1.input", args.Raw)

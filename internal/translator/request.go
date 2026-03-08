@@ -6,6 +6,7 @@
 package translator
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 
@@ -45,8 +46,10 @@ func ConvertOpenAIRequestToCodex(modelName string, rawJSON []byte, stream bool) 
 	} else if v := gjson.GetBytes(rawJSON, "reasoning.effort"); v.Exists() {
 		/* Responses API 格式 → 直接透传 */
 		out, _ = sjson.Set(out, "reasoning.effort", v.Value())
+	} else if v := gjson.GetBytes(rawJSON, "variant"); v.Exists() {
+		/* OpenWork 等客户端使用 variant 代替 reasoning_effort（issue #258） */
+		out, _ = sjson.Set(out, "reasoning.effort", v.Value())
 	}
-	/* 注意：不再强制设 medium，让用户/上游自行决定 */
 	out, _ = sjson.Set(out, "parallel_tool_calls", true)
 	out, _ = sjson.Set(out, "reasoning.summary", "auto")
 	out, _ = sjson.Set(out, "include", []string{"reasoning.encrypted_content"})
@@ -57,23 +60,39 @@ func ConvertOpenAIRequestToCodex(modelName string, rawJSON []byte, stream bool) 
 
 	/*
 	 * 构建 input 数组
-	 * Responses API 格式已有 input 字段，直接透传
+	 * Responses API 格式已有 input 字段，走快速路径
 	 * Chat Completions 格式只有 messages 字段，需要转换为 input
 	 */
 	existingInput := gjson.GetBytes(rawJSON, "input")
-	if existingInput.Exists() && existingInput.IsArray() {
+	if existingInput.Exists() {
 		/*
 		 * Responses API 快速路径：直接在原始 JSON 上原地修改
 		 * 不重建 JSON，大幅减少序列化开销和内存分配
 		 */
 		result := make([]byte, len(rawJSON))
 		copy(result, rawJSON)
+
+		/* input 为字符串时，转为标准消息数组格式 */
+		if existingInput.Type == gjson.String {
+			inputArr, _ := sjson.Set(
+				`[{"type":"message","role":"user","content":[{"type":"input_text","text":""}]}]`,
+				"0.content.0.text", existingInput.String(),
+			)
+			result, _ = sjson.SetRawBytes(result, "input", []byte(inputArr))
+		}
+
 		result, _ = sjson.SetBytes(result, "model", modelName)
 		result, _ = sjson.SetBytes(result, "stream", stream)
 		result, _ = sjson.SetBytes(result, "store", false)
+		result, _ = sjson.SetBytes(result, "parallel_tool_calls", true)
+		result, _ = sjson.SetBytes(result, "include", []string{"reasoning.encrypted_content"})
+
 		if v := gjson.GetBytes(rawJSON, "reasoning_effort"); v.Exists() {
 			result, _ = sjson.SetBytes(result, "reasoning.effort", v.Value())
 			result, _ = sjson.DeleteBytes(result, "reasoning_effort")
+		} else if v := gjson.GetBytes(rawJSON, "variant"); v.Exists() {
+			/* OpenWork 等客户端使用 variant 代替 reasoning_effort（issue #258） */
+			result, _ = sjson.SetBytes(result, "reasoning.effort", v.Value())
 		}
 
 		/* 确保 instructions 存在 */
@@ -87,7 +106,23 @@ func ConvertOpenAIRequestToCodex(modelName string, rawJSON []byte, stream bool) 
 		result, _ = sjson.DeleteBytes(result, "safety_identifier")
 		result, _ = sjson.DeleteBytes(result, "generate")
 		result, _ = sjson.DeleteBytes(result, "max_output_tokens")
-		result, _ = sjson.DeleteBytes(result, "service_tier")
+		result, _ = sjson.DeleteBytes(result, "max_completion_tokens")
+		result, _ = sjson.DeleteBytes(result, "temperature")
+		result, _ = sjson.DeleteBytes(result, "top_p")
+		result, _ = sjson.DeleteBytes(result, "truncation")
+		result, _ = sjson.DeleteBytes(result, "context_management")
+		result, _ = sjson.DeleteBytes(result, "user")
+		result, _ = sjson.DeleteBytes(result, "variant")
+
+		/* service_tier 仅保留 "priority" 值，其他删除 */
+		if v := gjson.GetBytes(result, "service_tier"); v.Exists() {
+			if v.String() != "priority" {
+				result, _ = sjson.DeleteBytes(result, "service_tier")
+			}
+		}
+
+		/* system role → developer 转换（Codex 不接受 system role） */
+		result = convertSystemRoleToDeveloper(result)
 
 		return result
 	}
@@ -453,6 +488,31 @@ func buildShortNameMap(names []string) map[string]string {
 		m[n] = uniq
 	}
 	return m
+}
+
+/**
+ * convertSystemRoleToDeveloper 遍历 input 数组，将 role="system" 转为 role="developer"
+ * Codex API 不接受 "system" role，必须使用 "developer"
+ * @param rawJSON - 请求体 JSON
+ * @returns []byte - 转换后的 JSON
+ */
+func convertSystemRoleToDeveloper(rawJSON []byte) []byte {
+	inputResult := gjson.GetBytes(rawJSON, "input")
+	if !inputResult.IsArray() {
+		return rawJSON
+	}
+
+	inputArray := inputResult.Array()
+	result := rawJSON
+
+	for i := 0; i < len(inputArray); i++ {
+		rolePath := fmt.Sprintf("input.%d.role", i)
+		if gjson.GetBytes(result, rolePath).String() == "system" {
+			result, _ = sjson.SetBytes(result, rolePath, "developer")
+		}
+	}
+
+	return result
 }
 
 /**
