@@ -154,18 +154,27 @@ var thinkingSuffixes = []string{
 
 /**
  * handleModels 模型列表接口
- * 为每个基础模型自动生成全部思考等级后缀变体
+ * 为每个基础模型自动生成全部思考等级后缀变体和 fast 模式变体
+ * 格式：model、model-level、model-fast、model-level-fast
  */
 func (h *ProxyHandler) handleModels(c *gin.Context) {
-	models := make([]gin.H, 0, len(baseModelList)*(1+len(thinkingSuffixes)))
+	models := make([]gin.H, 0, len(baseModelList)*(2+len(thinkingSuffixes)*2))
 
 	for _, base := range baseModelList {
 		/* 基础模型（无后缀） */
 		models = append(models, gin.H{"id": base, "object": "model", "owned_by": "openai"})
+		/* 基础模型 + fast */
+		models = append(models, gin.H{"id": base + "-fast", "object": "model", "owned_by": "openai"})
 		/* 生成全部思考等级变体 */
 		for _, suffix := range thinkingSuffixes {
 			models = append(models, gin.H{
 				"id":       base + "-" + suffix,
+				"object":   "model",
+				"owned_by": "openai",
+			})
+			/* 思考等级 + fast 组合 */
+			models = append(models, gin.H{
+				"id":       base + "-" + suffix + "-fast",
 				"object":   "model",
 				"owned_by": "openai",
 			})

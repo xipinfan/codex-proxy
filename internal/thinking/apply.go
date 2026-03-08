@@ -22,18 +22,23 @@ var levelToBudgetMap = map[string]int{
 	"low":     1024,
 	"medium":  8192,
 	"high":    24576,
-	"xhigh":  32768,
+	"xhigh":   32768,
 	"max":     128000,
 }
 
 /**
- * ApplyThinking 将思考配置应用到请求体
- * 解析模型名中的思考后缀，生成 ThinkingConfig，然后写入请求 JSON
+ * ApplyThinking 将思考配置和服务层级应用到请求体
+ * 解析模型名中的思考后缀和 -fast 后缀，写入请求 JSON
+ *
+ * 支持的后缀格式：
+ *   - gpt-5.4-high → reasoning.effort = "high"
+ *   - gpt-5.4-fast → service_tier = "fast"
+ *   - gpt-5.4-high-fast → reasoning.effort = "high" + service_tier = "fast"
  *
  * @param body - 原始请求体 JSON
- * @param model - 模型名（可能包含思考后缀，如 gpt-5-xhigh）
+ * @param model - 模型名（可能包含思考后缀和/或 -fast 后缀）
  * @returns []byte - 处理后的请求体 JSON
- * @returns string - 去除思考后缀后的真实模型名
+ * @returns string - 去除所有后缀后的真实模型名
  */
 func ApplyThinking(body []byte, model string) ([]byte, string) {
 	parsed := ParseModelSuffix(model)
@@ -47,13 +52,16 @@ func ApplyThinking(body []byte, model string) ([]byte, string) {
 		config = extractConfigFromBody(body)
 	}
 
-	/* 如果没有任何思考配置，直接返回 */
-	if !hasThinkingConfig(config) {
-		return body, baseModel
+	/* 应用思考配置到请求体 */
+	if hasThinkingConfig(config) {
+		body = applyCodexThinking(body, config)
 	}
 
-	/* 应用思考配置到请求体 */
-	body = applyCodexThinking(body, config)
+	/* 应用 fast 模式：设置 service_tier */
+	if parsed.IsFast {
+		body, _ = sjson.SetBytes(body, "service_tier", parsed.ServiceTier)
+	}
+
 	return body, baseModel
 }
 

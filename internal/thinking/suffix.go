@@ -75,15 +75,27 @@ func ParseModelSuffix(model string) ParseResult {
 		return ParseResult{ModelName: model, HasSuffix: false}
 	}
 
+	/*
+	 * 0. 先检测 -fast 后缀（服务层级），与思考后缀独立
+	 *    支持组合：gpt-5.4-fast、gpt-5.4-high-fast
+	 */
+	isFast := false
+	serviceTier := ""
+	if strings.HasSuffix(strings.ToLower(model), "-fast") {
+		isFast = true
+		serviceTier = "fast"
+		model = model[:len(model)-5] /* 剥离 "-fast" */
+	}
+
 	/* 1. 完整模型名就是已知模型，不做后缀解析 */
 	if knownBaseModels[strings.ToLower(model)] {
-		return ParseResult{ModelName: model, HasSuffix: false}
+		return ParseResult{ModelName: model, HasSuffix: false, IsFast: isFast, ServiceTier: serviceTier}
 	}
 
 	/* 2. 找到最后一个连字符的位置 */
 	lastDash := strings.LastIndex(model, "-")
 	if lastDash <= 0 || lastDash >= len(model)-1 {
-		return ParseResult{ModelName: model, HasSuffix: false}
+		return ParseResult{ModelName: model, HasSuffix: false, IsFast: isFast, ServiceTier: serviceTier}
 	}
 
 	suffix := strings.ToLower(model[lastDash+1:])
@@ -91,29 +103,33 @@ func ParseModelSuffix(model string) ParseResult {
 
 	/* 3. 前半部分必须是已知模型，才认为后半部分是思考后缀 */
 	if !knownBaseModels[strings.ToLower(modelName)] {
-		return ParseResult{ModelName: model, HasSuffix: false}
+		return ParseResult{ModelName: model, HasSuffix: false, IsFast: isFast, ServiceTier: serviceTier}
 	}
 
 	/* 4. 检查是否为有效的思考级别 */
 	if validThinkingSuffixes[suffix] {
 		return ParseResult{
-			ModelName: modelName,
-			HasSuffix: true,
-			RawSuffix: suffix,
+			ModelName:   modelName,
+			HasSuffix:   true,
+			RawSuffix:   suffix,
+			IsFast:      isFast,
+			ServiceTier: serviceTier,
 		}
 	}
 
 	/* 5. 检查是否为数字（token 预算） */
 	if _, err := strconv.Atoi(suffix); err == nil {
 		return ParseResult{
-			ModelName: modelName,
-			HasSuffix: true,
-			RawSuffix: suffix,
+			ModelName:   modelName,
+			HasSuffix:   true,
+			RawSuffix:   suffix,
+			IsFast:      isFast,
+			ServiceTier: serviceTier,
 		}
 	}
 
 	/* 不是有效的思考后缀，原样返回 */
-	return ParseResult{ModelName: model, HasSuffix: false}
+	return ParseResult{ModelName: model, HasSuffix: false, IsFast: isFast, ServiceTier: serviceTier}
 }
 
 /**
