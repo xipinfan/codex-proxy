@@ -77,8 +77,12 @@ func ParseModelSuffix(model string) ParseResult {
 			result.HasSuffix = true
 			result.RawSuffix = tail
 			model = model[:lastDash]
-		} else if _, err := strconv.Atoi(tail); err == nil {
-			/* 匹配到数字（token 预算） */
+		} else if v, err := strconv.Atoi(tail); err == nil && v > 100 {
+			/*
+			 * 匹配到数字 token 预算（必须 > 100）
+			 * 版本号（如 5、4、3）不会超过 100，token 预算通常 > 512
+			 * 避免 gpt-5 中的 "5" 被误判为预算
+			 */
 			result.HasSuffix = true
 			result.RawSuffix = tail
 			model = model[:lastDash]
