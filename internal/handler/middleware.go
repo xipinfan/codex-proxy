@@ -71,6 +71,10 @@ func GzipIfAccepted() gin.HandlerFunc {
 			c.Next()
 			return
 		}
+		if isV1Path(c.Request.URL.Path) {
+			c.Next()
+			return
+		}
 		if !clientAcceptsGzip(c.Request) {
 			c.Next()
 			return
@@ -105,6 +109,10 @@ func (w *gzipWriter) Write(data []byte) (int, error) {
 func clientAcceptsGzip(r *http.Request) bool {
 	enc := r.Header.Get("Accept-Encoding")
 	return enc != "" && strings.Contains(enc, "gzip")
+}
+
+func isV1Path(path string) bool {
+	return path == "/v1" || strings.HasPrefix(path, "/v1/")
 }
 
 func (w *gzipWriter) WriteHeader(statusCode int) {
