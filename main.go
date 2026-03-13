@@ -111,7 +111,7 @@ func main() {
 	r.Use(ginLogger())
 
 	/* 注册路由 */
-	proxyHandler := handler.NewProxyHandler(manager, exec, cfg.APIKeys, cfg.MaxRetry, cfg.ProxyURL)
+	proxyHandler := handler.NewProxyHandler(manager, exec, cfg.APIKeys, cfg.MaxRetry, cfg.ProxyURL, indexHTML)
 	proxyHandler.RegisterRoutes(r)
 
 	/* 使用 http.Server 以支持优雅关闭 */
