@@ -43,6 +43,7 @@ type Config struct {
 	MaxIdleConns           int      `yaml:"max-idle-conns"`
 	MaxIdleConnsPerHost    int      `yaml:"max-idle-conns-per-host"`
 	EnableHTTP2            bool     `yaml:"enable-http2"`
+	StartupAsyncLoad       bool     `yaml:"startup-async-load"`
 	Accounts               []string `yaml:"accounts"`
 	APIKeys                []string `yaml:"api-keys"`
 }
@@ -77,6 +78,7 @@ func LoadConfig(path string) (*Config, error) {
 		MaxIdleConns:           1024,
 		MaxIdleConnsPerHost:    512,
 		EnableHTTP2:            false,
+		StartupAsyncLoad:       true,
 	}
 
 	if err = yaml.Unmarshal(data, cfg); err != nil {

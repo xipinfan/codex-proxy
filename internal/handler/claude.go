@@ -8,6 +8,7 @@ package handler
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -101,6 +102,9 @@ func (h *ProxyHandler) executeClaudeStream(c *gin.Context, rc executor.RetryConf
 	}
 
 	if scanErr := scanner.Err(); scanErr != nil {
+		if errors.Is(scanErr, context.Canceled) || errors.Is(c.Request.Context().Err(), context.Canceled) {
+			return nil
+		}
 		log.Errorf("Claude 读取流式响应失败: %v", scanErr)
 		return scanErr
 	}

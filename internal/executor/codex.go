@@ -331,6 +331,14 @@ func (e *Executor) ExecuteStream(ctx context.Context, rc RetryConfig, requestBod
 	}
 
 	if err = scanner.Err(); err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
+			firstChunkDur := time.Duration(0)
+			if !firstChunkAt.IsZero() {
+				firstChunkDur = firstChunkAt.Sub(streamStart)
+			}
+			log.Infof("req summary stream model=%s account=%s attempts=%d convert=%v upstream_ttfb=%v first_chunk=%v to_completed=%v tail_after_completed=%v stream=%v chunks=%d total=%v (canceled)", baseModel, account.GetEmail(), attempts, convertDur, sendDur, firstChunkDur, time.Duration(0), time.Duration(0), time.Since(streamStart), chunkCount, time.Since(startTotal))
+			return nil
+		}
 		log.Errorf("读取流式响应失败: %v", err)
 		firstChunkDur := time.Duration(0)
 		completedDur := time.Duration(0)
@@ -503,6 +511,10 @@ func (e *Executor) ExecuteResponsesStream(ctx context.Context, rc RetryConfig, r
 		}
 		if readErr != nil {
 			if readErr != io.EOF {
+				if errors.Is(readErr, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
+					log.Infof("req summary responses-stream model=%s account=%s attempts=%d convert=%v upstream=%v total=%v (canceled)", baseModel, account.GetEmail(), attempts, convertDur, sendDur, time.Since(startTotal))
+					return nil
+				}
 				log.Errorf("读取流式响应失败: %v", readErr)
 				log.Infof("req summary responses-stream model=%s account=%s attempts=%d convert=%v upstream=%v total=%v (ERR)", baseModel, account.GetEmail(), attempts, convertDur, sendDur, time.Since(startTotal))
 				return readErr

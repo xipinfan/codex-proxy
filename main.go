@@ -67,15 +67,40 @@ func main() {
 	/* 初始化账号管理器 */
 	selector := auth.NewRoundRobinSelector()
 	manager := auth.NewManager(cfg.AuthDir, cfg.ProxyURL, cfg.RefreshInterval, selector)
-
-	if err = manager.LoadAccounts(); err != nil {
-		log.Fatalf("加载账号失败: %v", err)
-	}
 	manager.SetRefreshConcurrency(cfg.RefreshConcurrency)
 
 	/* 启动后台任务 */
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	if cfg.StartupAsyncLoad {
+		log.Infof("启动即服务可用: 已启用后台账号加载模式")
+		go func() {
+			start := time.Now()
+			for {
+				if ctx.Err() != nil {
+					return
+				}
+				if loadErr := manager.LoadAccounts(); loadErr != nil {
+					log.Warnf("后台加载账号失败: %v，10 秒后重试", loadErr)
+					select {
+					case <-ctx.Done():
+						return
+					case <-time.After(10 * time.Second):
+					}
+					continue
+				}
+				log.Infof("后台加载账号完成: 共 %d 个，耗时 %v", manager.AccountCount(), time.Since(start).Round(time.Millisecond))
+				return
+			}
+		}()
+	} else {
+		loadStart := time.Now()
+		if err = manager.LoadAccounts(); err != nil {
+			log.Fatalf("加载账号失败: %v", err)
+		}
+		log.Infof("账号加载完成: 共 %d 个，耗时 %v", manager.AccountCount(), time.Since(loadStart).Round(time.Millisecond))
+	}
 
 	/* 启动异步磁盘写入工作器（将 Token 写盘从刷新 goroutine 解耦） */
 	manager.StartSaveWorker(ctx)

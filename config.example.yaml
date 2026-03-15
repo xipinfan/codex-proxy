@@ -29,10 +29,22 @@ health-check-interval: 300
 health-check-max-failures: 2
 
 # 健康检查并发数
-health-check-concurrency: 50
+health-check-concurrency: 5
+
+# 启动后延迟多少秒再开始健康检查（避免和冷启动流量抢资源）
+health-check-start-delay: 45
+
+# 每轮健康检查最多抽查多少个账号（0 表示全量）
+health-check-batch-size: 20
+
+# 单个健康检查请求超时（秒）
+health-check-request-timeout: 8
 
 # Token 并发刷新数（2w 账号建议 100-200）
 refresh-concurrency: 50
+
+# 启动即服务可用：先启动 HTTP，再后台加载账号（推荐开启）
+startup-async-load: true
 
 # 连接池配置（0 表示不限制）
 max-conns-per-host: 512
