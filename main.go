@@ -10,7 +10,6 @@ import (
 	"database/sql"
 	"flag"
 	"fmt"
-	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
@@ -24,11 +23,10 @@ import (
 	"codex-proxy/internal/handler"
 	"codex-proxy/internal/static"
 
-	"github.com/gin-gonic/gin"
+	"github.com/fasthttp/router"
 	_ "github.com/lib/pq"
 	log "github.com/sirupsen/logrus"
-	"golang.org/x/net/http2"
-	"golang.org/x/net/http2/h2c"
+	"github.com/valyala/fasthttp"
 )
 
 /* ANSI 颜色代码 */
@@ -247,25 +245,25 @@ func main() {
 	exec.StartKeepAlive(ctx)
 
 	/* 初始化 HTTP 服务 */
-	if cfg.LogLevel != "debug" {
-		gin.SetMode(gin.ReleaseMode)
-	}
-	r := gin.New()
-	r.Use(handler.CORSAllowOrigin())
-	r.Use(handler.GzipIfAccepted())
-	r.Use(handler.OptionsBypass())
-	r.Use(gin.Recovery())
-	r.Use(ginLogger())
-
-	/* 注册路由 */
+	r := router.New()
 	proxyHandler := handler.NewProxyHandler(manager, exec, cfg.APIKeys, cfg.MaxRetry, cfg.ProxyURL, cfg.BaseURL, cfg.EnableHTTP2, cfg.BackendDomain, cfg.BackendResolveAddress, cfg.QuotaCheckConcurrency, cfg.UpstreamTimeoutSec, cfg.EmptyRetryMax, cfg.StreamIdleTimeoutSec, cfg.EnableStreamIdleRetry, static.IndexHTML)
 	proxyHandler.RegisterRoutes(r)
 
-	/* HTTP/2 明文 (h2c)：单连接多路复用；未升级的客户端仍走 HTTP/1.1 */
-	h2s := &http2.Server{}
-	srv := &http.Server{
-		Addr:    cfg.Listen,
-		Handler: h2c.NewHandler(r, h2s),
+	appHandler := r.Handler
+	appHandler = handler.OptionsBypass(appHandler)
+	appHandler = handler.CORSAllowOrigin(appHandler)
+	appHandler = handler.GzipIfAccepted(appHandler)
+	appHandler = fasthttpLogger(appHandler)
+
+	srv := &fasthttp.Server{
+		Handler:            appHandler,
+		Name:               "Codex Proxy",
+		DisableKeepalive:   false,
+		IdleTimeout:        time.Duration(cfg.ShutdownTimeout) * time.Second,
+		ReadTimeout:        0,
+		WriteTimeout:       0,
+		MaxConnsPerIP:      0,
+		MaxRequestsPerConn: 0,
 	}
 
 	/* 在 goroutine 中启动 HTTP 服务 */
@@ -274,7 +272,7 @@ func main() {
 			colorCyan, colorReset,
 			colorGreen, manager.AccountCount(), colorReset,
 			colorGreen, cfg.Listen, colorReset)
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := srv.ListenAndServe(cfg.Listen); err != nil {
 			log.Fatalf("HTTP 服务启动失败: %v", err)
 		}
 	}()
@@ -291,10 +289,7 @@ func main() {
 	if shutdownSec < 1 {
 		shutdownSec = 5
 	}
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), time.Duration(shutdownSec)*time.Second)
-	defer shutdownCancel()
-
-	if err := srv.Shutdown(shutdownCtx); err != nil {
+	if err := srv.Shutdown(); err != nil {
 		log.Errorf("HTTP 服务关闭异常: %v", err)
 	}
 
@@ -306,21 +301,19 @@ func main() {
 }
 
 /**
- * ginLogger 自定义 Gin 日志中间件（彩色输出）
- * @returns gin.HandlerFunc - Gin 中间件函数
+ * fasthttpLogger 自定义 FastHTTP 日志中间件（彩色输出）
  */
-func ginLogger() gin.HandlerFunc {
-	return func(c *gin.Context) {
+func fasthttpLogger(next fasthttp.RequestHandler) fasthttp.RequestHandler {
+	return func(ctx *fasthttp.RequestCtx) {
 		start := time.Now()
-		c.Next()
+		next(ctx)
 
-		status := c.Writer.Status()
+		status := ctx.Response.StatusCode()
 		latency := time.Since(start)
-		method := c.Request.Method
-		path := c.Request.URL.Path
-		client := c.ClientIP()
+		method := string(ctx.Method())
+		path := string(ctx.Path())
+		client := ctx.RemoteAddr().String()
 
-		/* 状态码着色 */
 		statusColor := colorGreen
 		switch {
 		case status >= 500:
@@ -331,7 +324,6 @@ func ginLogger() gin.HandlerFunc {
 			statusColor = colorCyan
 		}
 
-		/* 方法着色 */
 		methodColor := colorBlue
 		switch method {
 		case "POST":

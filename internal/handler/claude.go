@@ -12,29 +12,28 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/http"
 
 	"codex-proxy/internal/executor"
 	"codex-proxy/internal/translator"
 
-	"github.com/gin-gonic/gin"
 	log "github.com/sirupsen/logrus"
+	"github.com/valyala/fasthttp"
 )
 
 /**
  * handleMessages 处理 Claude Messages API 请求（/v1/messages）
  * 将 Claude 格式请求转换为 OpenAI 格式 → executor 内部选择账号/重试 → 响应转回 Claude 格式
  */
-func (h *ProxyHandler) handleMessages(c *gin.Context) {
-	body, err := io.ReadAll(c.Request.Body)
-	if err != nil {
-		sendClaudeError(c, http.StatusBadRequest, "invalid_request_error", "读取请求体失败")
+func (h *ProxyHandler) handleMessages(ctx *fasthttp.RequestCtx) {
+	body := ctx.PostBody()
+	if len(body) == 0 {
+		sendClaudeError(ctx, fasthttp.StatusBadRequest, "invalid_request_error", "读取请求体失败")
 		return
 	}
 
 	openaiBody, model, stream := translator.ConvertClaudeRequestToOpenAI(body)
 	if model == "" {
-		sendClaudeError(c, http.StatusBadRequest, "invalid_request_error", "缺少 model 字段")
+		sendClaudeError(ctx, fasthttp.StatusBadRequest, "invalid_request_error", "缺少 model 字段")
 		return
 	}
 
@@ -43,14 +42,14 @@ func (h *ProxyHandler) handleMessages(c *gin.Context) {
 	rc := h.buildRetryConfig()
 
 	if stream {
-		if execErr := h.executeClaudeStream(c, rc, openaiBody, model); execErr != nil {
-			handleClaudeExecutorError(c, execErr)
+		if execErr := h.executeClaudeStream(ctx, rc, openaiBody, model); execErr != nil {
+			handleClaudeExecutorError(ctx, execErr)
 		} else {
 			RecordRequest()
 		}
 	} else {
-		if execErr := h.executeClaudeNonStream(c, rc, openaiBody, model); execErr != nil {
-			handleClaudeExecutorError(c, execErr)
+		if execErr := h.executeClaudeNonStream(ctx, rc, openaiBody, model); execErr != nil {
+			handleClaudeExecutorError(ctx, execErr)
 		} else {
 			RecordRequest()
 		}
@@ -62,14 +61,14 @@ func (h *ProxyHandler) handleMessages(c *gin.Context) {
  * 通过 ExecuteRawCodexStream 获取原始 Codex SSE 流（内部已完成重试）
  * 逐行转换为 Claude SSE 事件写回客户端
  *
- * @param c - Gin 上下文
+ * @param ctx - FastHTTP 上下文
  * @param rc - 内部重试配置
  * @param openaiBody - 已转换为 OpenAI 格式的请求体
  * @param model - 模型名称
  * @returns error - 执行失败时返回错误
  */
-func (h *ProxyHandler) executeClaudeStream(c *gin.Context, rc executor.RetryConfig, openaiBody []byte, model string) error {
-	rawResp, account, err := h.executor.ExecuteRawCodexStream(c.Request.Context(), rc, openaiBody, model)
+func (h *ProxyHandler) executeClaudeStream(ctx *fasthttp.RequestCtx, rc executor.RetryConfig, openaiBody []byte, model string) error {
+	rawResp, account, err := h.executor.ExecuteRawCodexStream(ctx, rc, openaiBody, model)
 	if err != nil {
 		return err
 	}
@@ -80,43 +79,46 @@ func (h *ProxyHandler) executeClaudeStream(c *gin.Context, rc executor.RetryConf
 	}()
 
 	/* 只有到这里才开始写 SSE 头（重试在 executor 内部已完成） */
-	c.Writer.Header().Set("Content-Type", "text/event-stream")
-	c.Writer.Header().Set("Cache-Control", "no-cache")
-	c.Writer.Header().Set("Connection", "keep-alive")
-	c.Writer.WriteHeader(http.StatusOK)
+	ctx.Response.Header.Set("Content-Type", "text/event-stream")
+	ctx.Response.Header.Set("Cache-Control", "no-cache")
+	ctx.Response.Header.Set("Connection", "keep-alive")
+	ctx.SetStatusCode(fasthttp.StatusOK)
 
-	flusher, canFlush := c.Writer.(http.Flusher)
-	state := translator.NewClaudeStreamState(model)
+	ctx.SetBodyStreamWriter(func(w *bufio.Writer) {
+		writer := newFastHTTPResponseWriter(ctx, w)
+		state := translator.NewClaudeStreamState(model)
 
-	scanner := bufio.NewScanner(rawResp.Body)
-	scanner.Buffer(make([]byte, scannerInitSize), scannerMaxSize)
+		scanner := bufio.NewScanner(rawResp.Body)
+		scanner.Buffer(make([]byte, scannerInitSize), scannerMaxSize)
 
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		events := translator.ConvertCodexStreamToClaudeEvents(c.Request.Context(), line, state)
-		for _, event := range events {
-			_, _ = io.WriteString(c.Writer, event)
-			if canFlush {
-				flusher.Flush()
+		for scanner.Scan() {
+			line := scanner.Bytes()
+			events := translator.ConvertCodexStreamToClaudeEvents(ctx, line, state)
+			for _, event := range events {
+				_, _ = io.WriteString(writer, event)
+				writer.Flush()
+			}
+			if state.Completed {
+				break
 			}
 		}
-		if state.Completed {
-			break
-		}
-	}
 
-	if scanErr := scanner.Err(); scanErr != nil {
-		if errors.Is(scanErr, context.Canceled) || errors.Is(c.Request.Context().Err(), context.Canceled) {
-			return nil
+		if scanErr := scanner.Err(); scanErr != nil {
+			if errors.Is(scanErr, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
+				return
+			}
+			log.Errorf("Claude 读取流式响应失败: %v", scanErr)
+			return
 		}
-		log.Errorf("Claude 读取流式响应失败: %v", scanErr)
-		return scanErr
-	}
-	if !state.HasText && !state.HasToolUse {
+		if !state.HasText && !state.HasToolUse {
+			return
+		}
+		account.RecordSuccess()
+	})
+
+	if !ctx.Response.IsBodyStream() {
 		return executor.ErrEmptyResponse
 	}
-
-	account.RecordSuccess()
 	return nil
 }
 
@@ -131,8 +133,8 @@ func (h *ProxyHandler) executeClaudeStream(c *gin.Context, rc executor.RetryConf
  * @param model - 模型名称
  * @returns error - 执行失败时返回错误
  */
-func (h *ProxyHandler) executeClaudeNonStream(c *gin.Context, rc executor.RetryConfig, openaiBody []byte, model string) error {
-	rawResp, account, err := h.executor.ExecuteRawCodexStream(c.Request.Context(), rc, openaiBody, model)
+func (h *ProxyHandler) executeClaudeNonStream(ctx *fasthttp.RequestCtx, rc executor.RetryConfig, openaiBody []byte, model string) error {
+	rawResp, account, err := h.executor.ExecuteRawCodexStream(ctx, rc, openaiBody, model)
 	if err != nil {
 		return err
 	}
@@ -147,7 +149,7 @@ func (h *ProxyHandler) executeClaudeNonStream(c *gin.Context, rc executor.RetryC
 		return fmt.Errorf("读取响应失败: %w", err)
 	}
 
-	result := translator.ConvertCodexFullSSEToClaudeResponseWithMeta(c.Request.Context(), data, model)
+	result := translator.ConvertCodexFullSSEToClaudeResponseWithMeta(ctx, data, model)
 	if !result.FoundCompleted || result.JSON == "" {
 		return fmt.Errorf("未收到 response.completed 事件")
 	}
@@ -156,7 +158,9 @@ func (h *ProxyHandler) executeClaudeNonStream(c *gin.Context, rc executor.RetryC
 	}
 
 	account.RecordSuccess()
-	c.Data(http.StatusOK, "application/json", []byte(result.JSON))
+	ctx.Response.Header.Set("Content-Type", "application/json")
+	ctx.SetStatusCode(fasthttp.StatusOK)
+	ctx.SetBody([]byte(result.JSON))
 	return nil
 }
 
@@ -165,29 +169,29 @@ func (h *ProxyHandler) executeClaudeNonStream(c *gin.Context, rc executor.RetryC
  * @param c - Gin 上下文
  * @param err - executor 返回的错误
  */
-func handleClaudeExecutorError(c *gin.Context, err error) {
+func handleClaudeExecutorError(ctx *fasthttp.RequestCtx, err error) {
 	if errors.Is(err, executor.ErrEmptyResponse) {
-		sendClaudeError(c, http.StatusBadRequest, "invalid_response", "empty response")
+		sendClaudeError(ctx, fasthttp.StatusBadRequest, "invalid_response", "empty response")
 		return
 	}
 	if statusErr, ok := err.(*executor.StatusError); ok {
-		sendClaudeError(c, statusErr.Code, "api_error", string(statusErr.Body))
+		sendClaudeError(ctx, statusErr.Code, "api_error", string(statusErr.Body))
 		return
 	}
-	sendClaudeError(c, http.StatusInternalServerError, "api_error", err.Error())
+	sendClaudeError(ctx, fasthttp.StatusInternalServerError, "api_error", err.Error())
 }
 
 /**
  * sendClaudeError 发送 Claude 格式的错误响应
- * @param c - Gin 上下文
+ * @param ctx - FastHTTP 上下文
  * @param status - HTTP 状态码
  * @param errType - 错误类型
  * @param message - 错误消息
  */
-func sendClaudeError(c *gin.Context, status int, errType, message string) {
-	c.JSON(status, gin.H{
+func sendClaudeError(ctx *fasthttp.RequestCtx, status int, errType, message string) {
+	writeJSON(ctx, status, map[string]any{
 		"type": "error",
-		"error": gin.H{
+		"error": map[string]any{
 			"type":    errType,
 			"message": message,
 		},

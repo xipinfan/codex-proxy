@@ -1,0 +1,106 @@
+package handler
+
+import (
+	"bufio"
+	"encoding/json"
+	"net/http"
+	"strings"
+
+	"github.com/valyala/fasthttp"
+)
+
+func writeJSON(ctx *fasthttp.RequestCtx, status int, payload interface{}) {
+	ctx.SetContentType("application/json")
+	ctx.SetStatusCode(status)
+	b, err := json.Marshal(payload)
+	if err != nil {
+		ctx.SetStatusCode(fasthttp.StatusInternalServerError)
+		ctx.SetBodyString(`{"error":{"message":"json编码失败","type":"server_error"}}`)
+		return
+	}
+	ctx.SetBody(b)
+}
+
+func writeText(ctx *fasthttp.RequestCtx, status int, text string) {
+	ctx.SetContentType("text/plain; charset=utf-8")
+	ctx.SetStatusCode(status)
+	ctx.SetBodyString(text)
+}
+
+func isWebSocketUpgradeRequest(ctx *fasthttp.RequestCtx) bool {
+	if !bytesEqualFold(ctx.Request.Header.Peek("Upgrade"), []byte("websocket")) {
+		return false
+	}
+	connection := string(ctx.Request.Header.Peek("Connection"))
+	return strings.Contains(strings.ToLower(connection), "upgrade")
+}
+
+func bytesEqualFold(a, b []byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if toLowerASCII(a[i]) != toLowerASCII(b[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func toLowerASCII(c byte) byte {
+	if c >= 'A' && c <= 'Z' {
+		return c + ('a' - 'A')
+	}
+	return c
+}
+
+// fasthttp compatible http.ResponseWriter for executor stream APIs
+type fastHTTPResponseWriter struct {
+	ctx         *fasthttp.RequestCtx
+	bufWriter   *bufio.Writer
+	header      http.Header
+	wroteHeader bool
+}
+
+func newFastHTTPResponseWriter(ctx *fasthttp.RequestCtx, w *bufio.Writer) *fastHTTPResponseWriter {
+	return &fastHTTPResponseWriter{
+		ctx:       ctx,
+		bufWriter: w,
+		header:    make(http.Header),
+	}
+}
+
+func (w *fastHTTPResponseWriter) Header() http.Header {
+	return w.header
+}
+
+func (w *fastHTTPResponseWriter) WriteHeader(statusCode int) {
+	if w.wroteHeader {
+		return
+	}
+	for k, vs := range w.header {
+		for _, v := range vs {
+			w.ctx.Response.Header.Add(k, v)
+		}
+	}
+	w.ctx.SetStatusCode(statusCode)
+	w.wroteHeader = true
+}
+
+func (w *fastHTTPResponseWriter) Write(p []byte) (int, error) {
+	if !w.wroteHeader {
+		w.WriteHeader(http.StatusOK)
+	}
+	n, err := w.bufWriter.Write(p)
+	if err == nil {
+		_ = w.bufWriter.Flush()
+	}
+	return n, err
+}
+
+func (w *fastHTTPResponseWriter) Flush() {
+	_ = w.bufWriter.Flush()
+}
+
+var _ http.Flusher = (*fastHTTPResponseWriter)(nil)
+var _ http.ResponseWriter = (*fastHTTPResponseWriter)(nil)

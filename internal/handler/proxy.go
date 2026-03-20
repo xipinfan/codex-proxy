@@ -12,19 +12,18 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"net/http"
 	"strings"
 	"time"
 
 	"codex-proxy/internal/auth"
 	"codex-proxy/internal/executor"
 
-	"github.com/gin-gonic/gin"
-	"github.com/gorilla/websocket"
+	fasthttprouter "github.com/fasthttp/router"
+	"github.com/fasthttp/websocket"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
+	"github.com/valyala/fasthttp"
 )
 
 /* 与 executor 一致的缓冲与扫描器大小，便于统一调优 */
@@ -34,10 +33,10 @@ const (
 	scannerMaxSize  = 50 * 1024 * 1024
 )
 
-var responsesWSUpgrader = websocket.Upgrader{
+var responsesWSUpgrader = websocket.FastHTTPUpgrader{
 	ReadBufferSize:  wsBufferSize,
 	WriteBufferSize: wsBufferSize,
-	CheckOrigin: func(_ *http.Request) bool {
+	CheckOrigin: func(ctx *fasthttp.RequestCtx) bool {
 		return true
 	},
 }
@@ -94,9 +93,9 @@ func NewProxyHandler(manager *auth.Manager, exec *executor.Executor, apiKeys []s
 
 /**
  * RegisterRoutes 注册所有 HTTP 路由
- * @param r - Gin 引擎实例
+ * @param r - FastHTTP 路由实例
  */
-func (h *ProxyHandler) RegisterRoutes(r *gin.Engine) {
+func (h *ProxyHandler) RegisterRoutes(r *fasthttprouter.Router) {
 	/* 首页 */
 	r.GET("/", h.handleIndex)
 
@@ -104,31 +103,49 @@ func (h *ProxyHandler) RegisterRoutes(r *gin.Engine) {
 	r.GET("/health", h.handleHealth)
 
 	/* OpenAI 兼容接口 */
-	api := r.Group("/v1")
+	apiAuth := h.handleChatCompletions
 	if len(h.apiKeys) > 0 {
-		api.Use(h.authMiddleware())
+		apiAuth = h.authMiddleware(h.handleChatCompletions)
 	}
-	api.POST("/chat/completions", h.handleChatCompletions)
-	api.POST("/responses", h.handleResponses)
-	api.POST("/responses/compact", h.handleResponsesCompact)
-	api.POST("/messages", h.handleMessages)
-	api.GET("/models", h.handleModels)
+	r.POST("/v1/chat/completions", apiAuth)
 
-	/* 管理接口（配置了 API Key 时需要鉴权） */
-	mgmt := r.Group("")
+	apiResponses := h.handleResponses
 	if len(h.apiKeys) > 0 {
-		mgmt.Use(h.authMiddleware())
+		apiResponses = h.authMiddleware(h.handleResponses)
 	}
-	mgmt.GET("/stats", h.handleStats)
-	mgmt.POST("/refresh", h.handleRefresh)
-	mgmt.POST("/check-quota", h.handleCheckQuota)
+	r.POST("/v1/responses", apiResponses)
+	// r.POST("/v1/responses/compact", ... ) 原接口暂不支持
+
+	apiMessages := h.handleMessages
+	if len(h.apiKeys) > 0 {
+		apiMessages = h.authMiddleware(h.handleMessages)
+	}
+	r.POST("/v1/messages", apiMessages)
+
+	apiModels := h.handleModels
+	if len(h.apiKeys) > 0 {
+		apiModels = h.authMiddleware(h.handleModels)
+	}
+	r.GET("/v1/models", apiModels)
+
+	/* 管理接口 */
+	statsHandler := h.handleStats
+	refreshHandler := h.handleRefresh
+	checkQuotaHandler := h.handleCheckQuota
+	if len(h.apiKeys) > 0 {
+		statsHandler = h.authMiddleware(h.handleStats)
+		refreshHandler = h.authMiddleware(h.handleRefresh)
+		checkQuotaHandler = h.authMiddleware(h.handleCheckQuota)
+	}
+	r.GET("/stats", statsHandler)
+	r.POST("/refresh", refreshHandler)
+	r.POST("/check-quota", checkQuotaHandler)
 }
 
 /**
  * authMiddleware API Key 鉴权中间件
- * @returns gin.HandlerFunc - Gin 中间件
  */
-func (h *ProxyHandler) authMiddleware() gin.HandlerFunc {
+func (h *ProxyHandler) authMiddleware(next fasthttp.RequestHandler) fasthttp.RequestHandler {
 	keySet := make(map[string]struct{}, len(h.apiKeys))
 	for _, k := range h.apiKeys {
 		k = strings.TrimSpace(k)
@@ -137,17 +154,16 @@ func (h *ProxyHandler) authMiddleware() gin.HandlerFunc {
 		}
 	}
 
-	return func(c *gin.Context) {
+	return func(ctx *fasthttp.RequestCtx) {
 		if len(keySet) == 0 {
-			c.Next()
+			next(ctx)
 			return
 		}
 
 		token := ""
 		tokenSource := "none"
 
-		/* 兼容 OpenAI 风格：Authorization: Bearer <key>（大小写不敏感） */
-		authHeader := strings.TrimSpace(c.GetHeader("Authorization"))
+		authHeader := strings.TrimSpace(string(ctx.Request.Header.Peek("Authorization")))
 		if authHeader != "" {
 			parts := strings.Fields(authHeader)
 			if len(parts) == 2 && strings.EqualFold(parts[0], "Bearer") {
@@ -156,46 +172,46 @@ func (h *ProxyHandler) authMiddleware() gin.HandlerFunc {
 			}
 		}
 
-		/* 兼容 Claude 客户端常见头：x-api-key / api-key */
 		if token == "" {
-			token = strings.TrimSpace(c.GetHeader("x-api-key"))
+			token = strings.TrimSpace(string(ctx.Request.Header.Peek("x-api-key")))
 			if token != "" {
 				tokenSource = "x-api-key"
 			}
 		}
 		if token == "" {
-			token = strings.TrimSpace(c.GetHeader("api-key"))
+			token = strings.TrimSpace(string(ctx.Request.Header.Peek("api-key")))
 			if token != "" {
 				tokenSource = "api-key"
 			}
 		}
 
 		if _, ok := keySet[token]; !ok {
-			log.Debugf("鉴权失败: path=%s source=%s auth_present=%v x_api_key_present=%v api_key_present=%v token_len=%d", c.Request.URL.Path, tokenSource, authHeader != "", c.GetHeader("x-api-key") != "", c.GetHeader("api-key") != "", len(token))
-			c.JSON(http.StatusUnauthorized, gin.H{
-				"error": gin.H{
+			log.Debugf("鉴权失败: path=%s source=%s api_key_len=%d", string(ctx.Path()), tokenSource, len(token))
+			writeJSON(ctx, fasthttp.StatusUnauthorized, map[string]any{
+				"error": map[string]any{
 					"message": "无效的 API Key",
 					"type":    "invalid_request_error",
 					"code":    "invalid_api_key",
 				},
 			})
-			c.Abort()
 			return
 		}
-		log.Debugf("鉴权成功: path=%s source=%s token_len=%d", c.Request.URL.Path, tokenSource, len(token))
-		c.Next()
+
+		log.Debugf("鉴权成功: path=%s source=%s token_len=%d", string(ctx.Path()), tokenSource, len(token))
+		next(ctx)
 	}
 }
 
 /**
  * handleHealth 健康检查接口
  */
-func (h *ProxyHandler) handleHealth(c *gin.Context) {
-	c.JSON(http.StatusOK, gin.H{
+func (h *ProxyHandler) handleHealth(ctx *fasthttp.RequestCtx) {
+	writeJSON(ctx, fasthttp.StatusOK, map[string]any{
 		"status":   "ok",
 		"accounts": h.manager.AccountCount(),
 	})
 }
+
 type modelListEntry struct {
 	base     string
 	suffixes []string
@@ -220,18 +236,18 @@ var modelList = []modelListEntry{
  * handleModels 模型列表接口
  * 按 README 表格生成：每个基础模型 + 其支持的思考等级 + 均可加 -fast
  */
-func (h *ProxyHandler) handleModels(c *gin.Context) {
-	models := make([]gin.H, 0, 50*20) // 约 12 基础 × (2+8*2) 量级
+func (h *ProxyHandler) handleModels(ctx *fasthttp.RequestCtx) {
+	models := make([]map[string]interface{}, 0, 50*20)
 	for _, e := range modelList {
-		models = append(models, gin.H{"id": e.base, "object": "model", "owned_by": "openai"})
-		models = append(models, gin.H{"id": e.base + "-fast", "object": "model", "owned_by": "openai"})
+		models = append(models, map[string]interface{}{"id": e.base, "object": "model", "owned_by": "openai"})
+		models = append(models, map[string]interface{}{"id": e.base + "-fast", "object": "model", "owned_by": "openai"})
 		for _, s := range e.suffixes {
-			models = append(models, gin.H{"id": e.base + "-" + s, "object": "model", "owned_by": "openai"})
-			models = append(models, gin.H{"id": e.base + "-" + s + "-fast", "object": "model", "owned_by": "openai"})
+			models = append(models, map[string]interface{}{"id": e.base + "-" + s, "object": "model", "owned_by": "openai"})
+			models = append(models, map[string]interface{}{"id": e.base + "-" + s + "-fast", "object": "model", "owned_by": "openai"})
 		}
 	}
 
-	c.JSON(http.StatusOK, gin.H{
+	writeJSON(ctx, fasthttp.StatusOK, map[string]interface{}{
 		"object": "list",
 		"data":   models,
 	})
@@ -258,17 +274,17 @@ func (h *ProxyHandler) buildRetryConfig() executor.RetryConfig {
 
 /**
  * handleExecutorError 统一处理 executor 返回的错误
- * @param c - Gin 上下文
+ * @param ctx - FastHTTP 上下文
  * @param err - executor 返回的错误
  */
-func handleExecutorError(c *gin.Context, err error) {
+func handleExecutorError(ctx *fasthttp.RequestCtx, err error) {
 	if errors.Is(err, executor.ErrEmptyResponse) {
-		sendError(c, http.StatusBadRequest, "empty response", "invalid_response")
+		sendError(ctx, fasthttp.StatusBadRequest, "empty response", "invalid_response")
 		return
 	}
 	if statusErr, ok := err.(*executor.StatusError); ok {
-		c.JSON(statusErr.Code, gin.H{
-			"error": gin.H{
+		writeJSON(ctx, statusErr.Code, map[string]any{
+			"error": map[string]any{
 				"message": string(statusErr.Body),
 				"type":    "api_error",
 				"code":    fmt.Sprintf("upstream_%d", statusErr.Code),
@@ -276,7 +292,19 @@ func handleExecutorError(c *gin.Context, err error) {
 		})
 		return
 	}
-	sendError(c, http.StatusInternalServerError, err.Error(), "server_error")
+	sendError(ctx, fasthttp.StatusInternalServerError, err.Error(), "server_error")
+}
+
+/**
+ * sendError 发送 OpenAI 格式的错误响应
+ */
+func sendError(ctx *fasthttp.RequestCtx, status int, message, errType string) {
+	writeJSON(ctx, status, map[string]any{
+		"error": map[string]any{
+			"message": message,
+			"type":    errType,
+		},
+	})
 }
 
 /**
@@ -284,16 +312,16 @@ func handleExecutorError(c *gin.Context, err error) {
  * 解析请求 → executor 内部选择账号/重试 → 返回响应
  * 重试逻辑在 executor 内部完成，流式请求的 SSE 头只在成功后才写给客户端
  */
-func (h *ProxyHandler) handleChatCompletions(c *gin.Context) {
-	body, err := io.ReadAll(c.Request.Body)
-	if err != nil {
-		sendError(c, http.StatusBadRequest, "读取请求体失败", "invalid_request_error")
+func (h *ProxyHandler) handleChatCompletions(ctx *fasthttp.RequestCtx) {
+	body := ctx.PostBody()
+	if len(body) == 0 {
+		writeJSON(ctx, fasthttp.StatusBadRequest, map[string]any{"error": map[string]any{"message": "读取请求体失败", "type": "invalid_request_error"}})
 		return
 	}
 
 	model := gjson.GetBytes(body, "model").String()
 	if model == "" {
-		sendError(c, http.StatusBadRequest, "缺少 model 字段", "invalid_request_error")
+		writeJSON(ctx, fasthttp.StatusBadRequest, map[string]any{"error": map[string]any{"message": "缺少 model 字段", "type": "invalid_request_error"}})
 		return
 	}
 	stream := gjson.GetBytes(body, "stream").Bool()
@@ -303,27 +331,39 @@ func (h *ProxyHandler) handleChatCompletions(c *gin.Context) {
 	rc := h.buildRetryConfig()
 
 	if stream {
-		if execErr := h.executor.ExecuteStream(c.Request.Context(), rc, body, model, c.Writer); execErr != nil {
-			handleExecutorError(c, execErr)
-		} else {
+		ctx.Response.Header.Set("Content-Type", "text/event-stream")
+		ctx.Response.Header.Set("Cache-Control", "no-cache")
+		ctx.Response.Header.Set("Connection", "keep-alive")
+		ctx.SetStatusCode(fasthttp.StatusOK)
+
+		ctx.SetBodyStreamWriter(func(w *bufio.Writer) {
+			writer := newFastHTTPResponseWriter(ctx, w)
+			execErr := h.executor.ExecuteStream(ctx, rc, body, model, writer)
+			if execErr != nil {
+				handleExecutorError(ctx, execErr)
+				return
+			}
 			RecordRequest()
-		}
-	} else {
-		result, execErr := h.executor.ExecuteNonStream(c.Request.Context(), rc, body, model)
-		if execErr != nil {
-			handleExecutorError(c, execErr)
-			return
-		}
-		RecordRequest()
-		c.Data(http.StatusOK, "application/json", result)
+		})
+		return
 	}
+
+	result, execErr := h.executor.ExecuteNonStream(ctx, rc, body, model)
+	if execErr != nil {
+		handleExecutorError(ctx, execErr)
+		return
+	}
+	RecordRequest()
+	ctx.Response.Header.Set("Content-Type", "application/json")
+	ctx.SetStatusCode(fasthttp.StatusOK)
+	ctx.SetBody(result)
 }
 
 /**
  * handleStats 账号统计接口
  * 返回所有账号的状态、请求数、错误数等统计信息
  */
-func (h *ProxyHandler) handleStats(c *gin.Context) {
+func (h *ProxyHandler) handleStats(ctx *fasthttp.RequestCtx) {
 	accounts := h.manager.GetAccounts()
 	stats := make([]auth.AccountStats, 0, len(accounts))
 	active, cooldown, disabled := 0, 0, 0
@@ -344,8 +384,8 @@ func (h *ProxyHandler) handleStats(c *gin.Context) {
 		}
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"summary": gin.H{
+	writeJSON(ctx, fasthttp.StatusOK, map[string]any{
+		"summary": map[string]any{
 			"total":               len(accounts),
 			"active":              active,
 			"cooldown":            cooldown,
@@ -363,9 +403,9 @@ func (h *ProxyHandler) handleStats(c *gin.Context) {
  * 每刷新完一个账号就推送一条 SSE 事件，防止大量账号时超时
  * POST /refresh
  */
-func (h *ProxyHandler) handleRefresh(c *gin.Context) {
-	ch := h.manager.ForceRefreshAllStream(c.Request.Context(), h.quotaChecker)
-	writeSSEProgress(c, ch)
+func (h *ProxyHandler) handleRefresh(ctx *fasthttp.RequestCtx) {
+	ch := h.manager.ForceRefreshAllStream(ctx, h.quotaChecker)
+	writeSSEProgress(ctx, ch)
 }
 
 /**
@@ -373,34 +413,35 @@ func (h *ProxyHandler) handleRefresh(c *gin.Context) {
  * 每查询完一个账号就推送一条 SSE 事件，防止大量账号时超时
  * POST /check-quota
  */
-func (h *ProxyHandler) handleCheckQuota(c *gin.Context) {
-	ch := h.quotaChecker.CheckAllStream(c.Request.Context(), h.manager)
-	writeSSEProgress(c, ch)
+func (h *ProxyHandler) handleCheckQuota(ctx *fasthttp.RequestCtx) {
+	ch := h.quotaChecker.CheckAllStream(ctx, h.manager)
+	writeSSEProgress(ctx, ch)
 }
 
 /**
  * writeSSEProgress 将 ProgressEvent channel 以 SSE 格式写入 HTTP 响应
- * @param c - Gin 上下文
+ * @param ctx - FastHTTP 上下文
  * @param ch - 进度事件 channel
  */
-func writeSSEProgress(c *gin.Context, ch <-chan auth.ProgressEvent) {
-	c.Header("Content-Type", "text/event-stream")
-	c.Header("Cache-Control", "no-cache")
-	c.Header("Connection", "keep-alive")
-	c.Status(http.StatusOK)
+func writeSSEProgress(ctx *fasthttp.RequestCtx, ch <-chan auth.ProgressEvent) {
+	ctx.Response.Header.Set("Content-Type", "text/event-stream")
+	ctx.Response.Header.Set("Cache-Control", "no-cache")
+	ctx.Response.Header.Set("Connection", "keep-alive")
+	ctx.SetStatusCode(fasthttp.StatusOK)
 
-	flusher, canFlush := c.Writer.(http.Flusher)
-
-	for event := range ch {
-		data, err := json.Marshal(event)
-		if err != nil {
-			continue
+	ctx.SetBodyStreamWriter(func(w *bufio.Writer) {
+		for event := range ch {
+			data, err := json.Marshal(event)
+			if err != nil {
+				continue
+			}
+			_, _ = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event.Type, data)
+			_ = w.Flush()
+			if ctx.Err() != nil {
+				return
+			}
 		}
-		_, _ = fmt.Fprintf(c.Writer, "event: %s\ndata: %s\n\n", event.Type, data)
-		if canFlush {
-			flusher.Flush()
-		}
-	}
+	})
 }
 
 /**
@@ -408,21 +449,21 @@ func writeSSEProgress(c *gin.Context, ch <-chan auth.ProgressEvent) {
  * 直接透传 Codex 原生 SSE 事件或 response 对象，不做 Chat Completions 格式转换
  * 重试逻辑在 executor 内部完成
  */
-func (h *ProxyHandler) handleResponses(c *gin.Context) {
-	if websocket.IsWebSocketUpgrade(c.Request) {
-		h.handleResponsesWS(c)
+func (h *ProxyHandler) handleResponses(ctx *fasthttp.RequestCtx) {
+	if isWebSocketUpgradeRequest(ctx) {
+		h.handleResponsesWS(ctx)
 		return
 	}
 
-	body, err := io.ReadAll(c.Request.Body)
-	if err != nil {
-		sendError(c, http.StatusBadRequest, "读取请求体失败", "invalid_request_error")
+	body := ctx.PostBody()
+	if len(body) == 0 {
+		sendError(ctx, fasthttp.StatusBadRequest, "读取请求体失败", "invalid_request_error")
 		return
 	}
 
 	model := gjson.GetBytes(body, "model").String()
 	if model == "" {
-		sendError(c, http.StatusBadRequest, "缺少 model 字段", "invalid_request_error")
+		sendError(ctx, fasthttp.StatusBadRequest, "缺少 model 字段", "invalid_request_error")
 		return
 	}
 	stream := gjson.GetBytes(body, "stream").Bool()
@@ -432,92 +473,104 @@ func (h *ProxyHandler) handleResponses(c *gin.Context) {
 	rc := h.buildRetryConfig()
 
 	if stream {
-		if execErr := h.executor.ExecuteResponsesStream(c.Request.Context(), rc, body, model, c.Writer); execErr != nil {
-			handleExecutorError(c, execErr)
-		} else {
-			RecordRequest()
-		}
-	} else {
-		result, execErr := h.executor.ExecuteResponsesNonStream(c.Request.Context(), rc, body, model)
-		if execErr != nil {
-			handleExecutorError(c, execErr)
-			return
-		}
-		RecordRequest()
-		c.Data(http.StatusOK, "application/json", result)
-	}
-}
+		ctx.Response.Header.Set("Content-Type", "text/event-stream")
+		ctx.Response.Header.Set("Cache-Control", "no-cache")
+		ctx.Response.Header.Set("Connection", "keep-alive")
+		ctx.SetStatusCode(fasthttp.StatusOK)
 
-func (h *ProxyHandler) handleResponsesWS(c *gin.Context) {
-	conn, err := responsesWSUpgrader.Upgrade(c.Writer, c.Request, nil)
-	if err != nil {
-		log.Warnf("responses ws upgrade 失败: %v", err)
-		return
-	}
-	defer func() {
-		_ = conn.Close()
-	}()
-
-	inProgress := false
-	for {
-		msgType, message, readErr := conn.ReadMessage()
-		if readErr != nil {
-			return
-		}
-		if msgType != websocket.TextMessage {
-			h.writeWSError(conn, "invalid_request_error", "仅支持文本帧")
-			continue
-		}
-
-		eventType := gjson.GetBytes(message, "type").String()
-		switch eventType {
-		case "response.create":
-			if inProgress {
-				h.writeWSError(conn, "invalid_request_error", "同一连接不允许并发 response.create")
-				continue
-			}
-
-			respObj := gjson.GetBytes(message, "response")
-			if !respObj.Exists() {
-				h.writeWSError(conn, "invalid_request_error", "缺少 response 字段")
-				continue
-			}
-
-			requestBody := []byte(respObj.Raw)
-			requestBody, _ = sjson.SetBytes(requestBody, "stream", true)
-
-			model := gjson.GetBytes(requestBody, "model").String()
-			if model == "" {
-				h.writeWSError(conn, "invalid_request_error", "缺少 model 字段")
-				continue
-			}
-
-			inProgress = true
-			log.Infof("responses ws: 上游 WS 不可用或未启用，回退 HTTP/SSE 转发")
-			rc := h.buildRetryConfig()
-			streamErr := h.forwardResponsesSSEAsWS(c.Request.Context(), conn, rc, requestBody, model)
-			inProgress = false
-			if streamErr == nil {
-				RecordRequest()
-			}
-			if streamErr != nil {
-				if errors.Is(streamErr, executor.ErrEmptyResponse) {
-					h.writeWSError(conn, "invalid_response", "empty response")
-					_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(1008, "empty response"), time.Now().Add(2*time.Second))
-					return
-				}
-				h.writeWSError(conn, "api_error", streamErr.Error())
+		ctx.SetBodyStreamWriter(func(w *bufio.Writer) {
+			writer := newFastHTTPResponseWriter(ctx, w)
+			execErr := h.executor.ExecuteResponsesStream(ctx, rc, body, model, writer)
+			if execErr != nil {
+				handleExecutorError(ctx, execErr)
 				return
 			}
-			return
+			RecordRequest()
+		})
+		return
+	}
 
-		case "response.cancel", "response.close":
-			_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "closed"), time.Now().Add(2*time.Second))
-			return
+	result, execErr := h.executor.ExecuteResponsesNonStream(ctx, rc, body, model)
+	if execErr != nil {
+		handleExecutorError(ctx, execErr)
+		return
+	}
+	RecordRequest()
+	ctx.Response.Header.Set("Content-Type", "application/json")
+	ctx.SetStatusCode(fasthttp.StatusOK)
+	ctx.SetBody(result)
+}
 
-		default:
-			h.writeWSError(conn, "invalid_request_error", "不支持的事件类型")
+func (h *ProxyHandler) handleResponsesWS(ctx *fasthttp.RequestCtx) {
+	err := responsesWSUpgrader.Upgrade(ctx, func(conn *websocket.Conn) {
+		defer func() {
+			_ = conn.Close()
+		}()
+
+		inProgress := false
+		for {
+			msgType, message, readErr := conn.ReadMessage()
+			if readErr != nil {
+				return
+			}
+			if msgType != websocket.TextMessage {
+				h.writeWSError(conn, "invalid_request_error", "仅支持文本帧")
+				continue
+			}
+
+			eventType := gjson.GetBytes(message, "type").String()
+			switch eventType {
+			case "response.create":
+				if inProgress {
+					h.writeWSError(conn, "invalid_request_error", "同一连接不允许并发 response.create")
+					continue
+				}
+
+				respObj := gjson.GetBytes(message, "response")
+				if !respObj.Exists() {
+					h.writeWSError(conn, "invalid_request_error", "缺少 response 字段")
+					continue
+				}
+
+				requestBody := []byte(respObj.Raw)
+				requestBody, _ = sjson.SetBytes(requestBody, "stream", true)
+
+				model := gjson.GetBytes(requestBody, "model").String()
+				if model == "" {
+					h.writeWSError(conn, "invalid_request_error", "缺少 model 字段")
+					continue
+				}
+
+				inProgress = true
+				log.Infof("responses ws: 上游 WS 不可用或未启用，回退 HTTP/SSE 转发")
+				rc := h.buildRetryConfig()
+				streamErr := h.forwardResponsesSSEAsWS(ctx, conn, rc, requestBody, model)
+				inProgress = false
+				if streamErr == nil {
+					RecordRequest()
+				}
+				if streamErr != nil {
+					if errors.Is(streamErr, executor.ErrEmptyResponse) {
+						h.writeWSError(conn, "invalid_response", "empty response")
+						_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(1008, "empty response"), time.Now().Add(2*time.Second))
+						return
+					}
+					h.writeWSError(conn, "api_error", streamErr.Error())
+					return
+				}
+				return
+
+			case "response.cancel", "response.close":
+				_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "closed"), time.Now().Add(2*time.Second))
+				return
+
+			default:
+				h.writeWSError(conn, "invalid_request_error", "不支持的事件类型")
+			}
 		}
+	})
+	if err != nil {
+		log.Warnf("responses ws upgrade 失败: %v", err)
 	}
 }
 
@@ -590,16 +643,16 @@ func (h *ProxyHandler) writeWSError(conn *websocket.Conn, errType, message strin
  * 使用 /responses/compact 端点，直接透传 compact 格式（CBOR/SSE）响应
  * 重试逻辑在 executor 内部完成
  */
-func (h *ProxyHandler) handleResponsesCompact(c *gin.Context) {
-	body, err := io.ReadAll(c.Request.Body)
-	if err != nil {
-		sendError(c, http.StatusBadRequest, "读取请求体失败", "invalid_request_error")
+func (h *ProxyHandler) handleResponsesCompact(ctx *fasthttp.RequestCtx) {
+	body := ctx.PostBody()
+	if len(body) == 0 {
+		sendError(ctx, fasthttp.StatusBadRequest, "读取请求体失败", "invalid_request_error")
 		return
 	}
 
 	model := gjson.GetBytes(body, "model").String()
 	if model == "" {
-		sendError(c, http.StatusBadRequest, "缺少 model 字段", "invalid_request_error")
+		sendError(ctx, fasthttp.StatusBadRequest, "缺少 model 字段", "invalid_request_error")
 		return
 	}
 	stream := gjson.GetBytes(body, "stream").Bool()
@@ -609,34 +662,30 @@ func (h *ProxyHandler) handleResponsesCompact(c *gin.Context) {
 	rc := h.buildRetryConfig()
 
 	if stream {
-		if execErr := h.executor.ExecuteResponsesCompactStream(c.Request.Context(), rc, body, model, c.Writer); execErr != nil {
-			handleExecutorError(c, execErr)
-		} else {
-			RecordRequest()
-		}
-	} else {
-		result, execErr := h.executor.ExecuteResponsesCompactNonStream(c.Request.Context(), rc, body, model)
-		if execErr != nil {
-			handleExecutorError(c, execErr)
-			return
-		}
-		RecordRequest()
-		c.Data(http.StatusOK, "application/json", result)
-	}
-}
+		ctx.Response.Header.Set("Content-Type", "text/event-stream")
+		ctx.Response.Header.Set("Cache-Control", "no-cache")
+		ctx.Response.Header.Set("Connection", "keep-alive")
+		ctx.SetStatusCode(fasthttp.StatusOK)
 
-/**
- * sendError 发送 OpenAI 格式的错误响应
- * @param c - Gin 上下文
- * @param status - HTTP 状态码
- * @param message - 错误消息
- * @param errType - 错误类型
- */
-func sendError(c *gin.Context, status int, message, errType string) {
-	c.JSON(status, gin.H{
-		"error": gin.H{
-			"message": message,
-			"type":    errType,
-		},
-	})
+		ctx.SetBodyStreamWriter(func(w *bufio.Writer) {
+			writer := newFastHTTPResponseWriter(ctx, w)
+			execErr := h.executor.ExecuteResponsesCompactStream(ctx, rc, body, model, writer)
+			if execErr != nil {
+				handleExecutorError(ctx, execErr)
+				return
+			}
+			RecordRequest()
+		})
+		return
+	}
+
+	result, execErr := h.executor.ExecuteResponsesCompactNonStream(ctx, rc, body, model)
+	if execErr != nil {
+		handleExecutorError(ctx, execErr)
+		return
+	}
+	RecordRequest()
+	ctx.Response.Header.Set("Content-Type", "application/json")
+	ctx.SetStatusCode(fasthttp.StatusOK)
+	ctx.SetBody(result)
 }
