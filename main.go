@@ -138,19 +138,36 @@ func main() {
 			cfg.HealthCheckInterval, cfg.HealthCheckConcurrency, cfg.HealthCheckMaxFailures)
 	}
 
-	/* 数据库连接（可选） */
+	/* 数据库连接（可选）- 异步初始化以提升启动速度 */
 	var db *sql.DB
+	var dbInitDone = make(chan struct{})
 	if cfg.DBEnabled {
-		db, err = openOrCreatePostgres(cfg)
-		if err != nil {
-			log.Fatalf("数据库无法就绪: %v", err)
-		}
-		log.Infof("已连接数据库")
+		go func() {
+			defer close(dbInitDone)
+			var err error
+			db, err = openOrCreatePostgres(cfg)
+			if err != nil {
+				log.Fatalf("数据库无法就绪: %v", err)
+			}
+			log.Infof("已连接数据库")
 
-		if err = auth.SetupDB(db); err != nil {
-			log.Fatalf("数据库初始化失败: %v", err)
-		}
+			if err = auth.SetupDB(db); err != nil {
+				log.Fatalf("数据库初始化失败: %v", err)
+			}
+		}()
+	} else {
+		close(dbInitDone)
 	}
+
+	/* 初始化账号管理器 */
+	var selector auth.Selector
+	if cfg.Selector == "quota-first" {
+		selector = auth.NewQuotaFirstSelector()
+	} else {
+		selector = auth.NewRoundRobinSelector()
+	}
+	/* 等待数据库初始化完成（如果启用） */
+	<-dbInitDone
 
 	/* 初始化账号管理器 */
 	var selector auth.Selector
@@ -213,21 +230,25 @@ func main() {
 	/* 启动后台 Token 刷新 */
 	go manager.StartRefreshLoop(ctx)
 
-	/* 启动健康检查（如果配置了检查间隔） */
+	/* 延迟启动健康检查（在服务启动后异步进行，避免影响启动速度） */
 	if cfg.HealthCheckInterval > 0 {
-		healthChecker := auth.NewHealthChecker(
-			cfg.BaseURL, cfg.ProxyURL,
-			cfg.HealthCheckInterval,
-			cfg.HealthCheckMaxFailures,
-			cfg.HealthCheckConcurrency,
-			cfg.HealthCheckStartDelay,
-			cfg.HealthCheckBatchSize,
-			cfg.HealthCheckReqTimeout,
-			cfg.EnableHTTP2,
-			cfg.BackendDomain,
-			cfg.BackendResolveAddress,
-		)
-		go healthChecker.StartLoop(ctx, manager)
+		go func() {
+			// 等待服务完全启动
+			time.Sleep(2 * time.Second)
+			healthChecker := auth.NewHealthChecker(
+				cfg.BaseURL, cfg.ProxyURL,
+				cfg.HealthCheckInterval,
+				cfg.HealthCheckMaxFailures,
+				cfg.HealthCheckConcurrency,
+				cfg.HealthCheckStartDelay,
+				cfg.HealthCheckBatchSize,
+				cfg.HealthCheckReqTimeout,
+				cfg.EnableHTTP2,
+				cfg.BackendDomain,
+				cfg.BackendResolveAddress,
+			)
+			healthChecker.StartLoop(ctx, manager)
+		}()
 	}
 
 	/* 初始化执行器 */
@@ -241,8 +262,12 @@ func main() {
 		KeepaliveIntervalSec: cfg.KeepaliveInterval,
 	})
 
-	/* 启动连接池保活（防止长时间无请求后首次请求耗时过长） */
-	exec.StartKeepAlive(ctx)
+	/* 延迟启动连接池保活（在服务启动后异步进行） */
+	go func() {
+		// 短暂延迟，让HTTP服务先启动
+		time.Sleep(100 * time.Millisecond)
+		exec.StartKeepAlive(ctx)
+	}()
 
 	/* 初始化 HTTP 服务 */
 	r := router.New()

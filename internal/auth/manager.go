@@ -70,6 +70,7 @@ type Manager struct {
 	refreshBatchSize        int
 	saveQueue               chan *Account /* 异步磁盘写入队列 */
 	stopCh                  chan struct{}
+	importMu                sync.Mutex /* 防止并发导入账号文件到数据库 */
 }
 
 /**
@@ -173,7 +174,8 @@ func (m *Manager) prepareDBStatements() error {
 	stmt, err := m.db.Prepare(`
 INSERT INTO codex_accounts (account_id,email,id_token,access_token,refresh_token,expire,plan_type,last_refresh,updated_at)
 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW())
-ON CONFLICT (email) DO UPDATE SET
+ON CONFLICT (account_id) DO UPDATE SET
+	email = EXCLUDED.email,
 	id_token = EXCLUDED.id_token,
 	access_token = EXCLUDED.access_token,
 	refresh_token = EXCLUDED.refresh_token,
@@ -208,17 +210,17 @@ func (m *Manager) LoadAccounts() error {
 	defer m.mu.Unlock()
 
 	if m.db != nil {
+		/* 始终检查是否有新 JSON 文件需要导入到数据库 */
+		if m.authDir != "" {
+			if _, err := m.importAccountsFromFilesToDB(); err != nil {
+				log.Warnf("从磁盘迁移账号到数据库失败: %v", err)
+			}
+		}
+
 		if err := m.loadAccountsFromDB(); err != nil {
 			return fmt.Errorf("加载数据库账号失败: %w", err)
 		}
-		if len(m.accounts) == 0 && m.authDir != "" {
-			if err := m.importAccountsFromFilesToDB(); err != nil {
-				log.Warnf("从磁盘迁移账号到数据库失败: %v", err)
-			}
-			if err := m.loadAccountsFromDB(); err != nil {
-				return fmt.Errorf("加载数据库账号失败: %w", err)
-			}
-		}
+
 		if len(m.accounts) == 0 {
 			return fmt.Errorf("数据库中未找到有效账号")
 		}
@@ -246,12 +248,12 @@ func (m *Manager) LoadAccounts() error {
 		err  error
 	}
 
-	workerCount := runtime.GOMAXPROCS(0) * 4
-	if workerCount < 8 {
-		workerCount = 8
+	workerCount := runtime.GOMAXPROCS(0) * 8 // 增加并发度以提升启动速度
+	if workerCount < 16 {                    // 提高最小工作器数量
+		workerCount = 16
 	}
-	if workerCount > 128 {
-		workerCount = 128
+	if workerCount > 256 { // 允许更高的最大并发度
+		workerCount = 256
 	}
 	if workerCount > len(filePaths) && len(filePaths) > 0 {
 		workerCount = len(filePaths)
@@ -359,7 +361,7 @@ func (m *Manager) loadAccountsFromDB() error {
 		return nil
 	}
 
-	rows, err := m.db.Query(`SELECT account_id,email,id_token,access_token,refresh_token,expire,plan_type FROM codex_accounts`)
+	rows, err := m.db.Query(`SELECT account_id,email,id_token,access_token,refresh_token,expire,plan_type,last_refresh FROM codex_accounts`)
 	if err != nil {
 		return err
 	}
@@ -370,7 +372,8 @@ func (m *Manager) loadAccountsFromDB() error {
 
 	for rows.Next() {
 		var accountID, email, idToken, accessToken, refreshToken, expire, planType sql.NullString
-		if err := rows.Scan(&accountID, &email, &idToken, &accessToken, &refreshToken, &expire, &planType); err != nil {
+		var lastRefresh sql.NullTime
+		if err := rows.Scan(&accountID, &email, &idToken, &accessToken, &refreshToken, &expire, &planType, &lastRefresh); err != nil {
 			log.Warnf("读取数据库账号失败: %v", err)
 			continue
 		}
@@ -396,7 +399,11 @@ func (m *Manager) loadAccountsFromDB() error {
 				Expire:       expire.String,
 				PlanType:     planType.String,
 			},
-			Status: StatusActive,
+			Status:          StatusActive,
+			LastRefreshedAt: lastRefresh.Time,
+		}
+		if lastRefresh.Valid {
+			acc.lastRefreshMs.Store(lastRefresh.Time.UnixMilli())
 		}
 
 		accounts = append(accounts, acc)
@@ -412,16 +419,20 @@ func (m *Manager) loadAccountsFromDB() error {
 	return nil
 }
 
-func (m *Manager) importAccountsFromFilesToDB() error {
+func (m *Manager) importAccountsFromFilesToDB() (int, error) {
 	if m.db == nil {
-		return nil
+		return 0, nil
 	}
+
+	m.importMu.Lock()
+	defer m.importMu.Unlock()
 
 	entries, err := os.ReadDir(m.authDir)
 	if err != nil {
-		return err
+		return 0, err
 	}
 
+	importedCount := 0
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(strings.ToLower(entry.Name()), ".json") {
 			continue
@@ -451,6 +462,7 @@ func (m *Manager) importAccountsFromFilesToDB() error {
 			log.Warnf("导入账号到 DB 失败 [%s]: %v", acc.GetEmail(), err)
 			continue
 		}
+		importedCount++
 		// 成功写入数据库后删除本地 JSON 文件
 		if err := os.Remove(filePath); err != nil {
 			log.Warnf("删除已导入 JSON账号文件失败 [%s]: %v", filePath, err)
@@ -458,7 +470,7 @@ func (m *Manager) importAccountsFromFilesToDB() error {
 			log.Infof("已删除已导入 JSON账号文件: %s", filePath)
 		}
 	}
-	return nil
+	return importedCount, nil
 }
 
 func (m *Manager) saveTokenToDB(acc *Account) error {
@@ -470,14 +482,15 @@ func (m *Manager) saveTokenToDB(acc *Account) error {
 	defer acc.mu.RUnlock()
 
 	if m.saveTokenStmt != nil {
-		_, err := m.saveTokenStmt.Exec(acc.Token.AccountID, acc.Token.Email, acc.Token.IDToken, acc.Token.AccessToken, acc.Token.RefreshToken, acc.Token.Expire, acc.Token.PlanType, time.Now())
+		_, err := m.saveTokenStmt.Exec(acc.Token.AccountID, acc.Token.Email, acc.Token.IDToken, acc.Token.AccessToken, acc.Token.RefreshToken, acc.Token.Expire, acc.Token.PlanType, acc.LastRefreshedAt)
 		return err
 	}
 
 	_, err := m.db.Exec(`
 INSERT INTO codex_accounts (account_id,email,id_token,access_token,refresh_token,expire,plan_type,last_refresh,updated_at)
 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW())
-ON CONFLICT (email) DO UPDATE SET
+ON CONFLICT (account_id) DO UPDATE SET
+	email = EXCLUDED.email,
 	id_token = EXCLUDED.id_token,
 	access_token = EXCLUDED.access_token,
 	refresh_token = EXCLUDED.refresh_token,
@@ -485,7 +498,7 @@ ON CONFLICT (email) DO UPDATE SET
 	plan_type = EXCLUDED.plan_type,
 	last_refresh = EXCLUDED.last_refresh,
 	updated_at = NOW()
-`, acc.Token.AccountID, acc.Token.Email, acc.Token.IDToken, acc.Token.AccessToken, acc.Token.RefreshToken, acc.Token.Expire, acc.Token.PlanType, time.Now())
+`, acc.Token.AccountID, acc.Token.Email, acc.Token.IDToken, acc.Token.AccessToken, acc.Token.RefreshToken, acc.Token.Expire, acc.Token.PlanType, acc.LastRefreshedAt)
 
 	return err
 }
@@ -738,6 +751,27 @@ func (m *Manager) enqueueSave(acc *Account) {
  */
 func (m *Manager) scanNewFiles() {
 	if m.db != nil {
+		if m.authDir == "" {
+			return
+		}
+		// 数据库模式下，也要扫描目录并将 JSON 导入数据库
+		// 导入过程涉及磁盘和数据库 IO，在锁外执行
+		count, err := m.importAccountsFromFilesToDB()
+		if err != nil {
+			log.Warnf("热加载: 导入 JSON 文件到数据库失败: %v", err)
+			return
+		}
+		if count > 0 {
+			m.mu.Lock()
+			if err := m.loadAccountsFromDB(); err != nil {
+				m.mu.Unlock()
+				log.Warnf("热加载: 重新加载数据库账号失败: %v", err)
+				return
+			}
+			m.publishSnapshot()
+			m.mu.Unlock()
+			log.Infof("热加载: 已将 %d 个新增 JSON 文件导入数据库，当前总计 %d 个", count, m.AccountCount())
+		}
 		return
 	}
 	entries, err := os.ReadDir(m.authDir)
