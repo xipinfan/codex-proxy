@@ -125,14 +125,40 @@ const (
 
 /* 禁用原因编码 */
 const (
-	ReasonNone               = ""
-	ReasonAuth401            = "auth_401"
+	ReasonNone    = ""
+	ReasonAuth401 = "auth_401"
+	/* ReasonAuth401Disabled 上游 401 且刷新/额度复核均失败，凭据文件已重命名禁用 */
+	ReasonAuth401Disabled    = "auth_401_disabled"
 	ReasonAuth403            = "auth_403"
 	ReasonQuotaExhausted     = "quota_exhausted"
 	ReasonRefreshFailed      = "refresh_failed"
 	ReasonHealthCheck        = "health_check_failed"
 	ReasonQuotaRecheckFailed = "quota_recheck_failed"
 )
+
+/**
+ * Auth401RecoverStatus POST /recover-auth 等「401 恢复」流程的终端状态
+ */
+type Auth401RecoverStatus string
+
+const (
+	Auth401RecoverInvalid       Auth401RecoverStatus = "invalid_input"
+	Auth401RecoverSkippedBusy   Auth401RecoverStatus = "skipped_busy"
+	Auth401RecoverRefreshed     Auth401RecoverStatus = "refreshed"
+	Auth401RecoverCooldown429OK Auth401RecoverStatus = "cooldown_429_quota_ok"
+	Auth401RecoverDisabled      Auth401RecoverStatus = "disabled"
+)
+
+/**
+ * Auth401RecoverResult 单次账号 401 恢复（同步刷新 → 429 则查额度 → 失败则禁用凭据）的结果
+ */
+type Auth401RecoverResult struct {
+	Email      string               `json:"email"`
+	FilePath   string               `json:"file_path,omitempty"`
+	Status     Auth401RecoverStatus `json:"status"`
+	ReasonCode string               `json:"reason_code,omitempty"`
+	Detail     string               `json:"detail,omitempty"`
+}
 
 /**
  * AccountStats 账号统计信息（只读快照）

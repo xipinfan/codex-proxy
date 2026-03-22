@@ -210,6 +210,41 @@ type RetryConfig struct {
 	EnableStreamIdleRetry bool
 }
 
+/**
+ * MergeRetryConfigExcluded 将 extra 中的账号路径并入每次选号时的 excluded 映射。
+ * 用于空响应等场景下换号重试：须与 PickFn 同样作用于 HealthyPickFn / FallbackRecentPickFn，否则会再次选到应排除的号。
+ */
+func MergeRetryConfigExcluded(rc RetryConfig, extra map[string]bool) RetryConfig {
+	if len(extra) == 0 {
+		return rc
+	}
+	merge := func(excl map[string]bool) {
+		for k := range extra {
+			excl[k] = true
+		}
+	}
+	out := rc
+	out.PickFn = func(m string, excl map[string]bool) (*auth.Account, error) {
+		merge(excl)
+		return rc.PickFn(m, excl)
+	}
+	if rc.HealthyPickFn != nil {
+		h := rc.HealthyPickFn
+		out.HealthyPickFn = func(m string, excl map[string]bool) (*auth.Account, error) {
+			merge(excl)
+			return h(m, excl)
+		}
+	}
+	if rc.FallbackRecentPickFn != nil {
+		f := rc.FallbackRecentPickFn
+		out.FallbackRecentPickFn = func(m string, excl map[string]bool) (*auth.Account, error) {
+			merge(excl)
+			return f(m, excl)
+		}
+	}
+	return out
+}
+
 /* 上游 HTTP/2 GOAWAY ENHANCE_YOUR_CALM 时的错误特征，用于日志与提示 */
 const enhanceYourCalmHint = "（上游限流：可调低 max-conns-per-host / max-idle-conns-per-host 或关闭 enable-http2）"
 
@@ -620,13 +655,7 @@ func (e *Executor) ExecuteNonStream(ctx context.Context, rc RetryConfig, request
 	excludedForEmpty := make(map[string]bool)
 
 	for emptyAttempt := 0; emptyAttempt <= emptyRetryMax; emptyAttempt++ {
-		rcExcl := rc
-		rcExcl.PickFn = func(m string, excl map[string]bool) (*auth.Account, error) {
-			for k := range excludedForEmpty {
-				excl[k] = true
-			}
-			return rc.PickFn(m, excl)
-		}
+		rcExcl := MergeRetryConfigExcluded(rc, excludedForEmpty)
 		sendStart := time.Now()
 		httpResp, account, attempts, err := e.sendWithRetry(ctx, rcExcl, model, apiURL, codexBody, true)
 		sendDur := time.Since(sendStart)

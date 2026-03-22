@@ -148,14 +148,17 @@ func (h *ProxyHandler) RegisterRoutes(r *fasthttprouter.Router) {
 	statsHandler := h.handleStats
 	refreshHandler := h.handleRefresh
 	checkQuotaHandler := h.handleCheckQuota
+	recoverAuthHandler := h.handleRecoverAuth
 	if len(h.apiKeys) > 0 {
 		statsHandler = h.authMiddleware(h.handleStats)
 		refreshHandler = h.authMiddleware(h.handleRefresh)
 		checkQuotaHandler = h.authMiddleware(h.handleCheckQuota)
+		recoverAuthHandler = h.authMiddleware(h.handleRecoverAuth)
 	}
 	r.GET("/stats", statsHandler)
 	r.POST("/refresh", refreshHandler)
 	r.POST("/check-quota", checkQuotaHandler)
+	r.POST("/recover-auth", recoverAuthHandler)
 }
 
 /**
@@ -282,7 +285,7 @@ func (h *ProxyHandler) buildRetryConfig() executor.RetryConfig {
 		PickFn: func(model string, excluded map[string]bool) (*auth.Account, error) {
 			return h.manager.PickExcluding(model, excluded)
 		},
-		On401Fn: func(acc *auth.Account) { h.manager.HandleAuth401(acc) },
+		On401Fn: func(acc *auth.Account) { h.manager.HandleAuth401(acc, h.quotaChecker) },
 		On429RecoveryFn: func(ctx context.Context, acc *auth.Account) {
 			h.manager.ScheduleUpstream429Recovery(ctx, acc, h.quotaChecker)
 		},
@@ -394,11 +397,7 @@ func (h *ProxyHandler) handleChatCompletions(ctx *fasthttp.RequestCtx) {
 	rc := h.buildRetryConfig()
 
 	if stream {
-		ctx.Response.Header.Set("Content-Type", "text/event-stream")
-		ctx.Response.Header.Set("Cache-Control", "no-cache")
-		ctx.Response.Header.Set("Connection", "keep-alive")
-		ctx.SetStatusCode(fasthttp.StatusOK)
-
+		/* 须等 sendWithRetry 成功后再写 200 与 SSE 头（由 executor 经 ResponseWriter 写入），否则失败后无法向客户端返回真实上游状态码 */
 		ctx.SetBodyStreamWriter(func(w *bufio.Writer) {
 			writer := newFastHTTPResponseWriter(ctx, w)
 			execErr := h.executor.ExecuteStream(ctx, rc, body, model, writer)
@@ -557,6 +556,69 @@ func queryBoolArg(args *fasthttp.Args, key string) bool {
 }
 
 /**
+ * handleRecoverAuth POST /recover-auth
+ * 对指定账号或全部账号执行与上游 401 相同的恢复流程：同步刷新 token；遇 429 则查额度；仍失败则禁用凭据（JSON 重命名为 *.disabled）
+ * 请求体 JSON：{ "email":"..." } 或 { "file_path":"..." } 指定其一；{ "all": true } 遍历当前号池全部账号（顺序执行，账号多时会较慢）
+ */
+func (h *ProxyHandler) handleRecoverAuth(ctx *fasthttp.RequestCtx) {
+	start := time.Now()
+	body := ctx.PostBody()
+	if len(body) == 0 {
+		writeJSON(ctx, fasthttp.StatusBadRequest, map[string]any{
+			"error": map[string]any{"message": "请求体不能为空", "type": "invalid_request_error"},
+		})
+		return
+	}
+	var req struct {
+		Email    string `json:"email"`
+		FilePath string `json:"file_path"`
+		All      bool   `json:"all"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		writeJSON(ctx, fasthttp.StatusBadRequest, map[string]any{
+			"error": map[string]any{"message": "JSON 解析失败", "type": "invalid_request_error"},
+		})
+		return
+	}
+
+	baseCtx, cancel := context.WithTimeout(context.Background(), 2*time.Hour)
+	defer cancel()
+
+	if req.All {
+		list := h.manager.GetAccounts()
+		results := make([]auth.Auth401RecoverResult, 0, len(list))
+		for _, acc := range list {
+			results = append(results, h.manager.RecoverAuth401(baseCtx, acc, h.quotaChecker))
+		}
+		writeJSON(ctx, fasthttp.StatusOK, map[string]any{
+			"object":      "list",
+			"results":     results,
+			"count":       len(results),
+			"duration_ms": time.Since(start).Milliseconds(),
+		})
+		return
+	}
+
+	acc := h.manager.FindAccountByIdentifier(req.Email, req.FilePath)
+	if acc == nil {
+		writeJSON(ctx, fasthttp.StatusNotFound, map[string]any{
+			"error": map[string]any{
+				"message": "未找到账号，请提供 email 或 file_path，或设置 all 为 true",
+				"type":    "invalid_request_error",
+			},
+		})
+		return
+	}
+
+	r := h.manager.RecoverAuth401(baseCtx, acc, h.quotaChecker)
+	writeJSON(ctx, fasthttp.StatusOK, map[string]any{
+		"object":      "auth401_recover_result",
+		"result":      r,
+		"duration_ms": time.Since(start).Milliseconds(),
+	})
+}
+
+/**
  * handleRefresh 手动刷新所有账号的 Token（SSE 流式返回进度）
  * 每刷新完一个账号就推送一条 SSE 事件，防止大量账号时超时
  * POST /refresh
@@ -587,6 +649,7 @@ func writeSSEProgress(ctx *fasthttp.RequestCtx, ch <-chan auth.ProgressEvent) {
 	ctx.Response.Header.Set("Connection", "keep-alive")
 	ctx.SetStatusCode(fasthttp.StatusOK)
 
+	/* fasthttp：StreamWriter 内禁止访问 RequestCtx（见 SetBodyStreamWriter 文档） */
 	ctx.SetBodyStreamWriter(func(w *bufio.Writer) {
 		for event := range ch {
 			data, err := json.Marshal(event)
@@ -595,9 +658,6 @@ func writeSSEProgress(ctx *fasthttp.RequestCtx, ch <-chan auth.ProgressEvent) {
 			}
 			_, _ = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event.Type, data)
 			_ = w.Flush()
-			if ctx.Err() != nil {
-				return
-			}
 		}
 	})
 }
@@ -631,11 +691,6 @@ func (h *ProxyHandler) handleResponses(ctx *fasthttp.RequestCtx) {
 	rc := h.buildRetryConfig()
 
 	if stream {
-		ctx.Response.Header.Set("Content-Type", "text/event-stream")
-		ctx.Response.Header.Set("Cache-Control", "no-cache")
-		ctx.Response.Header.Set("Connection", "keep-alive")
-		ctx.SetStatusCode(fasthttp.StatusOK)
-
 		ctx.SetBodyStreamWriter(func(w *bufio.Writer) {
 			writer := newFastHTTPResponseWriter(ctx, w)
 			execErr := h.executor.ExecuteResponsesStream(ctx, rc, body, model, writer)
@@ -729,16 +784,7 @@ func (h *ProxyHandler) forwardResponsesSSEAsWS(ctx context.Context, conn *websoc
 	excludedForEmpty := make(map[string]bool)
 
 	for emptyAttempt := 0; emptyAttempt <= emptyRetryMax; emptyAttempt++ {
-		rcExcl := rc
-		if len(excludedForEmpty) > 0 {
-			origPick := rc.PickFn
-			rcExcl.PickFn = func(m string, excl map[string]bool) (*auth.Account, error) {
-				for k := range excludedForEmpty {
-					excl[k] = true
-				}
-				return origPick(m, excl)
-			}
-		}
+		rcExcl := executor.MergeRetryConfigExcluded(rc, excludedForEmpty)
 
 		rawResp, account, attempts, baseModel, convertDur, sendDur, err := h.executor.OpenResponsesStream(ctx, rcExcl, requestBody, model)
 		if err != nil {
@@ -868,11 +914,6 @@ func (h *ProxyHandler) handleResponsesCompact(ctx *fasthttp.RequestCtx) {
 	rc := h.buildRetryConfig()
 
 	if stream {
-		ctx.Response.Header.Set("Content-Type", "text/event-stream")
-		ctx.Response.Header.Set("Cache-Control", "no-cache")
-		ctx.Response.Header.Set("Connection", "keep-alive")
-		ctx.SetStatusCode(fasthttp.StatusOK)
-
 		ctx.SetBodyStreamWriter(func(w *bufio.Writer) {
 			writer := newFastHTTPResponseWriter(ctx, w)
 			execErr := h.executor.ExecuteResponsesCompactStream(ctx, rc, body, model, writer)
