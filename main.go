@@ -131,6 +131,9 @@ func main() {
 	log.Infof("监听地址: %s%s%s", colorGreen, cfg.Listen, colorReset)
 	log.Infof("账号目录: %s", cfg.AuthDir)
 	log.Infof("API 基础 URL: %s", cfg.BaseURL)
+	if cfg.ProxyURL != "" {
+		log.Infof("代理地址: %s%s%s", colorGreen, cfg.ProxyURL, colorReset)
+	}
 	log.Infof("刷新间隔: %d 秒", cfg.RefreshInterval)
 	log.Infof("最大重试: %d 次", cfg.MaxRetry)
 	if cfg.HealthCheckInterval > 0 {

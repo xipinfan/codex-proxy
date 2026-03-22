@@ -28,7 +28,13 @@ backend-domain: "chatgpt.com"
 # Codex API 基础 URL（可选，配置后优先于 backend-domain）
 # base-url: "https://chatgpt.com/backend-api/codex"
 
-# HTTP/SOCKS5 代理地址（可选）
+# HTTP/HTTPS/SOCKS5 代理地址（可选）
+# 支持格式:
+#   HTTP 代理: http://host:port 或 http://user:pass@host:port
+#   HTTPS 代理: https://host:port 或 https://user:pass@host:port
+#   SOCKS5 代理: socks5://host:port 或 socks5://user:pass@host:port
+#   SOCKS5(DNS via proxy): socks5h://host:port 或 socks5h://user:pass@host:port
+# 例如: proxy-url: "socks5://127.0.0.1:1080"
 # proxy-url: "http://127.0.0.1:7890"
 
 # 日志级别: debug, info, warn, error
