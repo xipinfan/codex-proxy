@@ -8,6 +8,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"flag"
 	"fmt"
 	"net/url"
@@ -196,16 +197,29 @@ func main() {
 		log.Infof("启动即服务可用: 已启用后台账号加载模式")
 		go func() {
 			start := time.Now()
+			batch := cfg.StartupLoadBatchSize
+			if batch < 1 {
+				batch = 8000
+			}
 			for {
 				if ctx.Err() != nil {
 					return
 				}
-				if loadErr := manager.LoadAccounts(); loadErr != nil {
+				loadErr := manager.LoadAccountsProgressive(ctx, batch)
+				if loadErr != nil {
+					if errors.Is(loadErr, context.Canceled) || errors.Is(loadErr, context.DeadlineExceeded) {
+						return
+					}
 					retrySec := cfg.StartupLoadRetryInterval
 					if retrySec < 1 {
 						retrySec = 10
 					}
-					log.Warnf("后台加载账号失败: %v，%d 秒后重试", loadErr, retrySec)
+					n := manager.AccountCount()
+					if n > 0 {
+						log.Warnf("启动分批加载报错: %v（号池当前 %d 个，选号直接读号池；%d 秒后重试本流程）", loadErr, n, retrySec)
+					} else {
+						log.Warnf("后台加载账号失败: %v，%d 秒后重试", loadErr, retrySec)
+					}
 					select {
 					case <-ctx.Done():
 						return

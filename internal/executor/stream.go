@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"time"
@@ -27,7 +28,36 @@ type CodexResponsesStream struct {
 	reverseTools map[string]string
 }
 
+/* prefixThenRestCloser 首读已拉取的字节 + 剩余 Body，供在返回给客户端前探测 GOAWAY 后仍能透传已读数据 */
+type prefixThenRestCloser struct {
+	prefix []byte
+	off    int
+	rest   io.ReadCloser
+}
+
+func (p *prefixThenRestCloser) Read(b []byte) (int, error) {
+	if p.off < len(p.prefix) {
+		n := copy(b, p.prefix[p.off:])
+		p.off += n
+		return n, nil
+	}
+	if p.rest == nil {
+		return 0, io.EOF
+	}
+	return p.rest.Read(b)
+}
+
+func (p *prefixThenRestCloser) Close() error {
+	if p.rest == nil {
+		return nil
+	}
+	err := p.rest.Close()
+	p.rest = nil
+	return err
+}
+
 // OpenCodexResponsesStream 完成选号、重试与首包前的 HTTP 往返；调用方在写入客户端 SSE 头后再 Pump。
+// 在返回前做一次首读：若立即遇 GOAWAY 等可重试错误则关连接换号重来，减少「已 200 后 pump 才断」的失败率。
 func (e *Executor) OpenCodexResponsesStream(ctx context.Context, rc RetryConfig, requestBody []byte, model string) (*CodexResponsesStream, error) {
 	convertStart := time.Now()
 	body, baseModel := thinking.ApplyThinking(requestBody, model)
@@ -35,19 +65,66 @@ func (e *Executor) OpenCodexResponsesStream(ctx context.Context, rc RetryConfig,
 	convertDur := time.Since(convertStart)
 	apiURL := e.baseURL + "/responses"
 	sendStart := time.Now()
-	httpResp, account, attempts, err := e.sendWithRetry(ctx, rc, model, apiURL, codexBody, true)
-	if err != nil {
-		return nil, err
+
+	readRounds := 1 + rc.EmptyRetryMax
+	if readRounds < 2 {
+		readRounds = 2
 	}
-	return &CodexResponsesStream{
-		body:         httpResp.Body,
-		account:      account,
-		Attempts:     attempts,
-		BaseModel:    baseModel,
-		ConvertDur:   convertDur,
-		SendDur:      time.Since(sendStart),
-		reverseTools: translator.BuildReverseToolNameMap(requestBody),
-	}, nil
+	if rc.EmptyRetryMax < 0 {
+		readRounds = 2
+	}
+	excluded := make(map[string]bool)
+
+	for round := 0; round < readRounds; round++ {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		rcExcl := MergeRetryConfigExcluded(rc, excluded)
+		httpResp, account, attempts, err := e.sendWithRetry(ctx, rcExcl, model, apiURL, codexBody, true)
+		if err != nil {
+			return nil, err
+		}
+
+		buf := make([]byte, 32768)
+		n, rerr := httpResp.Body.Read(buf)
+		if rerr != nil && rerr != io.EOF {
+			_ = httpResp.Body.Close()
+			account.RecordFailure()
+			if isRetryableUpstreamReadErr(rerr) && round+1 < readRounds {
+				excluded[account.FilePath] = true
+				log.Warnf("responses-stream 首读失败，换号/重建连接重试 (%d/%d) account=%s: %v", round+1, readRounds, account.GetEmail(), wrapReadErr(rerr))
+				continue
+			}
+			return nil, fmt.Errorf("读取上游流失败: %w", wrapReadErr(rerr))
+		}
+
+		sendDur := time.Since(sendStart)
+		var bodyRC io.ReadCloser = httpResp.Body
+		if n > 0 {
+			prefix := append([]byte(nil), buf[:n]...)
+			bodyRC = &prefixThenRestCloser{prefix: prefix, rest: httpResp.Body}
+		} else if rerr == io.EOF {
+			_ = httpResp.Body.Close()
+			account.RecordFailure()
+			if round+1 < readRounds {
+				excluded[account.FilePath] = true
+				log.Warnf("responses-stream 上游立即 EOF，换号重试 (%d/%d) account=%s", round+1, readRounds, account.GetEmail())
+				continue
+			}
+			return nil, fmt.Errorf("读取上游流失败: 空响应")
+		}
+
+		return &CodexResponsesStream{
+			body:         bodyRC,
+			account:      account,
+			Attempts:     attempts,
+			BaseModel:    baseModel,
+			ConvertDur:   convertDur,
+			SendDur:      sendDur,
+			reverseTools: translator.BuildReverseToolNameMap(requestBody),
+		}, nil
+	}
+	return nil, fmt.Errorf("读取上游流失败")
 }
 
 // PumpChatCompletion 将 Codex SSE 转为 OpenAI Chat Completions 块写入 w（客户端 SSE 头须已由 handler 写好）。

@@ -15,7 +15,11 @@ import (
 	"time"
 
 	log "github.com/sirupsen/logrus"
+	"golang.org/x/sync/singleflight"
 )
+
+/* defaultStartupLoadBatch 异步启动时单批并入号池的 JSON 文件数上限 */
+const defaultStartupLoadBatch = 8000
 
 /* 并发刷新与运维默认配置 */
 const (
@@ -82,6 +86,8 @@ type Manager struct {
 	importMu                sync.Mutex /* 防止并发导入账号文件到数据库 */
 	refreshHTTPPolicy       map[int]httpStatusPolicy
 	quotaHTTPPolicy         map[int]httpStatusPolicy
+	/* auth401SF 合并同一凭据文件的并发 401 恢复，避免多请求重复打 OAuth */
+	auth401SF singleflight.Group
 }
 
 /**
@@ -246,67 +252,30 @@ func (m *Manager) SetRefreshConcurrency(n int) {
 }
 
 /**
- * LoadAccounts 从账号目录加载所有 JSON 账号文件
- * @returns error - 加载失败时返回错误
+ * loadAccountsFromPathsParallel 并发解析路径列表（持锁外执行，供全量/分批加载共用）
  */
-func (m *Manager) LoadAccounts() error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if m.db != nil {
-		/* 始终检查是否有新 JSON 文件需要导入到数据库 */
-		if m.authDir != "" {
-			if _, err := m.importAccountsFromFilesToDB(); err != nil {
-				log.Warnf("从磁盘迁移账号到数据库失败: %v", err)
-			}
-		}
-
-		if err := m.loadAccountsFromDB(); err != nil {
-			return fmt.Errorf("加载数据库账号失败: %w", err)
-		}
-
-		if len(m.accounts) == 0 {
-			return fmt.Errorf("数据库中未找到有效账号")
-		}
-		m.publishSnapshot()
-		log.Infof("共加载 %d 个 Codex 账号（PostgreSQL）", len(m.accounts))
+func loadAccountsFromPathsParallel(filePaths []string) []*Account {
+	if len(filePaths) == 0 {
 		return nil
 	}
-
-	entries, err := os.ReadDir(m.authDir)
-	if err != nil {
-		return fmt.Errorf("读取账号目录失败: %w", err)
-	}
-
-	filePaths := make([]string, 0, len(entries))
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(strings.ToLower(entry.Name()), ".json") {
-			continue
-		}
-		filePaths = append(filePaths, filepath.Join(m.authDir, entry.Name()))
-	}
-
 	type loadResult struct {
 		path string
 		acc  *Account
 		err  error
 	}
-
-	workerCount := runtime.GOMAXPROCS(0) * 8 // 增加并发度以提升启动速度
-	if workerCount < 16 {                    // 提高最小工作器数量
+	workerCount := runtime.GOMAXPROCS(0) * 8
+	if workerCount < 16 {
 		workerCount = 16
 	}
-	if workerCount > 256 { // 允许更高的最大并发度
+	if workerCount > 256 {
 		workerCount = 256
 	}
-	if workerCount > len(filePaths) && len(filePaths) > 0 {
+	if workerCount > len(filePaths) {
 		workerCount = len(filePaths)
 	}
-
 	jobs := make(chan string, workerCount*2)
 	results := make(chan loadResult, workerCount*2)
 	var wg sync.WaitGroup
-
 	for i := 0; i < workerCount; i++ {
 		wg.Add(1)
 		go func() {
@@ -317,7 +286,6 @@ func (m *Manager) LoadAccounts() error {
 			}
 		}()
 	}
-
 	go func() {
 		for _, p := range filePaths {
 			jobs <- p
@@ -326,22 +294,153 @@ func (m *Manager) LoadAccounts() error {
 		wg.Wait()
 		close(results)
 	}()
-
-	accounts := make([]*Account, 0, len(filePaths))
-	index := make(map[string]*Account, len(filePaths))
+	out := make([]*Account, 0, len(filePaths))
 	for r := range results {
 		if r.err != nil {
 			log.Warnf("加载账号文件失败 [%s]: %v", filepath.Base(r.path), r.err)
 			continue
 		}
-		accounts = append(accounts, r.acc)
-		index[r.path] = r.acc
+		out = append(out, r.acc)
 	}
+	return out
+}
 
+/**
+ * mergeAppendAccounts 将新解析的账号并入号池（按 FilePath 去重），并发布快照
+ */
+func (m *Manager) mergeAppendAccounts(newAccs []*Account) (added int) {
+	if len(newAccs) == 0 {
+		return 0
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, acc := range newAccs {
+		if acc == nil {
+			continue
+		}
+		if _, exists := m.accountIndex[acc.FilePath]; exists {
+			continue
+		}
+		m.accounts = append(m.accounts, acc)
+		m.accountIndex[acc.FilePath] = acc
+		added++
+	}
+	if added > 0 {
+		m.publishSnapshot()
+	}
+	return added
+}
+
+/**
+ * LoadAccountsProgressive 按批读取磁盘 JSON 并入号池，无需等全部文件解析完即可选号（仅非 DB 模式）
+ */
+func (m *Manager) LoadAccountsProgressive(ctx context.Context, batchSize int) error {
+	m.mu.Lock()
+	if m.db != nil {
+		m.mu.Unlock()
+		return m.LoadAccounts()
+	}
+	authDir := m.authDir
+	m.mu.Unlock()
+
+	if authDir == "" {
+		return fmt.Errorf("未配置账号目录")
+	}
+	if batchSize < 1 {
+		batchSize = defaultStartupLoadBatch
+	}
+	entries, err := os.ReadDir(authDir)
+	if err != nil {
+		return fmt.Errorf("读取账号目录失败: %w", err)
+	}
+	filePaths := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(strings.ToLower(entry.Name()), ".json") {
+			continue
+		}
+		filePaths = append(filePaths, filepath.Join(authDir, entry.Name()))
+	}
+	if len(filePaths) == 0 {
+		return fmt.Errorf("在目录 %s 中未找到 .json 账号文件", authDir)
+	}
+	for i := 0; i < len(filePaths); i += batchSize {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		end := i + batchSize
+		if end > len(filePaths) {
+			end = len(filePaths)
+		}
+		batch := filePaths[i:end]
+		loaded := loadAccountsFromPathsParallel(batch)
+		added := m.mergeAppendAccounts(loaded)
+		log.Infof("启动分批加载: 本批纳入 %d 个有效账号，号池累计 %d 个，已处理 %d/%d 个文件",
+			added, m.AccountCount(), end, len(filePaths))
+	}
+	if m.AccountCount() == 0 {
+		return fmt.Errorf("在目录 %s 中未找到有效的账号文件", authDir)
+	}
+	return nil
+}
+
+/**
+ * LoadAccounts 从账号目录加载所有 JSON 账号文件（全量替换号池）；或从数据库一次性加载
+ * @returns error - 加载失败时返回错误
+ */
+func (m *Manager) LoadAccounts() error {
+	m.mu.Lock()
+	if m.db != nil {
+		/* 始终检查是否有新 JSON 文件需要导入到数据库 */
+		if m.authDir != "" {
+			if _, err := m.importAccountsFromFilesToDB(); err != nil {
+				log.Warnf("从磁盘迁移账号到数据库失败: %v", err)
+			}
+		}
+
+		if err := m.loadAccountsFromDB(); err != nil {
+			m.mu.Unlock()
+			return fmt.Errorf("加载数据库账号失败: %w", err)
+		}
+
+		if len(m.accounts) == 0 {
+			m.mu.Unlock()
+			return fmt.Errorf("数据库中未找到有效账号")
+		}
+		m.publishSnapshot()
+		n := len(m.accounts)
+		m.mu.Unlock()
+		log.Infof("共加载 %d 个 Codex 账号（PostgreSQL）", n)
+		return nil
+	}
+	authDir := m.authDir
+	m.mu.Unlock()
+
+	if authDir == "" {
+		return fmt.Errorf("未配置账号目录")
+	}
+	entries, err := os.ReadDir(authDir)
+	if err != nil {
+		return fmt.Errorf("读取账号目录失败: %w", err)
+	}
+	filePaths := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(strings.ToLower(entry.Name()), ".json") {
+			continue
+		}
+		filePaths = append(filePaths, filepath.Join(authDir, entry.Name()))
+	}
+	accounts := loadAccountsFromPathsParallel(filePaths)
 	if len(accounts) == 0 {
-		return fmt.Errorf("在目录 %s 中未找到有效的账号文件", m.authDir)
+		return fmt.Errorf("在目录 %s 中未找到有效的账号文件", authDir)
 	}
-
+	index := make(map[string]*Account, len(accounts))
+	for _, a := range accounts {
+		index[a.FilePath] = a
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.accounts = accounts
 	m.accountIndex = index
 	m.publishSnapshot()
@@ -1589,6 +1688,7 @@ func (m *Manager) FindAccountByIdentifier(email, filePath string) *Account {
 
 /**
  * RecoverAuth401 对指定账号执行 401 恢复：同步刷新 → 若 429 则查额度（qc 非空）→ 仍失败则禁用凭据文件
+ * 同一凭据文件上并发的 RecoverAuth401 会合并为单次 OAuth（singleflight），避免多连接重复刷新刷屏。
  * ctx 为外层上限；单次 OAuth 另受 refresh-single-timeout-sec 约束（非对话 API）
  */
 func (m *Manager) RecoverAuth401(ctx context.Context, acc *Account, qc *QuotaChecker) Auth401RecoverResult {
@@ -1598,6 +1698,17 @@ func (m *Manager) RecoverAuth401(ctx context.Context, acc *Account, qc *QuotaChe
 	if acc == nil {
 		return Auth401RecoverResult{Status: Auth401RecoverInvalid, Detail: "account is nil"}
 	}
+	key := acc.FilePath
+	if key == "" {
+		key = acc.GetEmail()
+	}
+	v, _, _ := m.auth401SF.Do(key, func() (interface{}, error) {
+		return m.recoverAuth401Once(ctx, acc, qc), nil
+	})
+	return v.(Auth401RecoverResult)
+}
+
+func (m *Manager) recoverAuth401Once(ctx context.Context, acc *Account, qc *QuotaChecker) Auth401RecoverResult {
 	email := acc.GetEmail()
 	fp := acc.FilePath
 	out := Auth401RecoverResult{Email: email, FilePath: fp}
@@ -1608,7 +1719,7 @@ func (m *Manager) RecoverAuth401(ctx context.Context, acc *Account, qc *QuotaChe
 		if m.waitAccountRefreshIdle(ctx, acc) {
 			out.Status = Auth401RecoverRefreshed
 			out.Detail = "waited_peer_refresh"
-			log.Infof("账号 [%s] 401 恢复：已等待进行中的刷新结束，将用当前凭据重试上游", email)
+			log.Debugf("账号 [%s] 401 恢复：已等待进行中的刷新结束，将用当前凭据重试上游", email)
 			return out
 		}
 		out.Status = Auth401RecoverSkippedBusy

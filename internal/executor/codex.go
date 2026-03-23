@@ -175,11 +175,11 @@ type RetryConfig struct {
 	HealthyPickMinAttempt int /* 从第几次尝试起（0-based）改用 HealthyPickFn；0 表示主循环中不用；通常为 max-retry-1 */
 	FallbackRecentPickFn  func(model string, excluded map[string]bool) (*auth.Account, error)
 	/* On401Fn 返回 true 表示已换发新 access_token（或 429 后额度已恢复），调用方应对同一账号立即重发上游请求 */
-	On401Fn               func(acc *auth.Account) bool
-	On429RecoveryFn       func(ctx context.Context, acc *auth.Account)
-	OnAfterUpstreamErrFn  func(acc *auth.Account, statusCode int)
-	MaxRetry              int
-	EmptyRetryMax         int
+	On401Fn              func(acc *auth.Account) bool
+	On429RecoveryFn      func(ctx context.Context, acc *auth.Account)
+	OnAfterUpstreamErrFn func(acc *auth.Account, statusCode int)
+	MaxRetry             int
+	EmptyRetryMax        int
 }
 
 /**
@@ -237,6 +237,20 @@ func wrapReadErr(err error) error {
 	return err
 }
 
+/* isRetryableUpstreamReadErr 响应体读取阶段遇连接被掐、GOAWAY 等，可换号/重建连接再试（Do() 已成功时 sendWithRetry 无法覆盖） */
+func isRetryableUpstreamReadErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	for e := err; e != nil; e = errors.Unwrap(e) {
+		if netutil.IsRetryableUpstreamNetError(e) {
+			return true
+		}
+	}
+	s := err.Error()
+	return strings.Contains(s, "GOAWAY") || strings.Contains(s, "ENHANCE_YOUR_CALM")
+}
+
 /**
  * IsRetryableStatus 判断 HTTP 状态码是否可重试（切换账号重试）
  * 403（地域封锁 / Cloudflare 拦截）换账号也无法解决，不重试
@@ -283,6 +297,8 @@ func (e *Executor) sendWithRetry(ctx context.Context, rc RetryConfig, model stri
 
 		const maxSameAccount401Rounds = 3
 		var lastStatus *StatusError
+		/* 每个选号尝试内最多做一次 OAuth 401 恢复；刷新后仍 401 则直接换号，避免与「换号提速」冲突 */
+		did401Refresh := false
 		for round := 0; round < maxSameAccount401Rounds; round++ {
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
@@ -330,9 +346,16 @@ func (e *Executor) sendWithRetry(ctx context.Context, rc RetryConfig, model stri
 			lastStatus = &StatusError{Code: httpResp.StatusCode, Body: errBody}
 			log.Debugf("send stage model=%s account=%s attempt=%d/%d pick=%v build=%v upstream_wait=%v total=%v status=%d", model, account.GetEmail(), attemptOneBased, maxLabel, pickDur, buildDur, doDur, time.Since(startAttempt), httpResp.StatusCode)
 
-			if httpResp.StatusCode == 401 && rc.On401Fn != nil && rc.On401Fn(account) {
-				log.Debugf("账号 [%s] 401 恢复成功，同请求内立即重试上游", account.GetEmail())
-				continue
+			if httpResp.StatusCode == 401 && rc.On401Fn != nil {
+				if did401Refresh {
+					log.Debugf("账号 [%s] 已刷新后仍 401，结束同号重试并换号", account.GetEmail())
+					return nil, lastStatus
+				}
+				if rc.On401Fn(account) {
+					did401Refresh = true
+					log.Debugf("账号 [%s] 401 恢复成功，同请求内立即重试上游", account.GetEmail())
+					continue
+				}
 			}
 
 			return nil, lastStatus
@@ -607,53 +630,73 @@ func (e *Executor) ExecuteResponsesNonStream(ctx context.Context, rc RetryConfig
 	convertDur := time.Since(convertStart)
 	apiURL := e.baseURL + "/responses"
 
+	readRounds := 1 + rc.EmptyRetryMax
+	if readRounds < 2 {
+		readRounds = 2
+	}
+	if rc.EmptyRetryMax < 0 {
+		readRounds = 2
+	}
+	excluded := make(map[string]bool)
 	sendStart := time.Now()
-	httpResp, account, attempts, err := e.sendWithRetry(ctx, rc, model, apiURL, codexBody, true)
-	if err != nil {
-		return nil, err
-	}
-	sendDur := time.Since(sendStart)
-	defer func() {
-		_ = httpResp.Body.Close()
-	}()
 
-	scanner := bufio.NewScanner(httpResp.Body)
-	scanner.Buffer(make([]byte, scannerInitSize), scannerMaxSize)
+	for round := 0; round < readRounds; round++ {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		rcExcl := MergeRetryConfigExcluded(rc, excluded)
+		httpResp, account, attempts, err := e.sendWithRetry(ctx, rcExcl, model, apiURL, codexBody, true)
+		if err != nil {
+			return nil, err
+		}
+		sendDur := time.Since(sendStart)
 
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if !bytes.HasPrefix(line, []byte("data:")) {
-			continue
-		}
-		jsonData := bytes.TrimSpace(line[5:])
-		if gjson.GetBytes(jsonData, "type").String() != "response.completed" {
-			continue
-		}
-		if resp := gjson.GetBytes(jsonData, "response"); resp.Exists() {
-			/* 仅在响应存在时才记录 usage */
-			usage := gjson.GetBytes(jsonData, "response.usage")
-			if usage.Exists() {
-				account.RecordUsage(
-					usage.Get("input_tokens").Int(),
-					usage.Get("output_tokens").Int(),
-					usage.Get("total_tokens").Int(),
-				)
+		scanner := bufio.NewScanner(httpResp.Body)
+		scanner.Buffer(make([]byte, scannerInitSize), scannerMaxSize)
+
+		for scanner.Scan() {
+			line := scanner.Bytes()
+			if !bytes.HasPrefix(line, []byte("data:")) {
+				continue
 			}
-			account.RecordSuccess()
-			log.Infof("req summary responses-nonstream model=%s account=%s attempts=%d convert=%v upstream=%v total=%v", baseModel, account.GetEmail(), attempts, convertDur, sendDur, time.Since(startTotal))
-			return []byte(resp.Raw), nil
+			jsonData := bytes.TrimSpace(line[5:])
+			if gjson.GetBytes(jsonData, "type").String() != "response.completed" {
+				continue
+			}
+			if resp := gjson.GetBytes(jsonData, "response"); resp.Exists() {
+				_ = httpResp.Body.Close()
+				usage := gjson.GetBytes(jsonData, "response.usage")
+				if usage.Exists() {
+					account.RecordUsage(
+						usage.Get("input_tokens").Int(),
+						usage.Get("output_tokens").Int(),
+						usage.Get("total_tokens").Int(),
+					)
+				}
+				account.RecordSuccess()
+				log.Infof("req summary responses-nonstream model=%s account=%s attempts=%d convert=%v upstream=%v total=%v", baseModel, account.GetEmail(), attempts, convertDur, sendDur, time.Since(startTotal))
+				return []byte(resp.Raw), nil
+			}
 		}
-	}
 
-	if err = scanner.Err(); err != nil {
+		if err := scanner.Err(); err != nil {
+			_ = httpResp.Body.Close()
+			account.RecordFailure()
+			if isRetryableUpstreamReadErr(err) && round+1 < readRounds {
+				excluded[account.FilePath] = true
+				log.Warnf("responses-nonstream 读 SSE 失败，换号重试 (%d/%d): %v", round+1, readRounds, wrapReadErr(err))
+				continue
+			}
+			log.Infof("req summary responses-nonstream model=%s account=%s attempts=%d convert=%v upstream=%v total=%v (ERR)", baseModel, account.GetEmail(), attempts, convertDur, sendDur, time.Since(startTotal))
+			return nil, fmt.Errorf("读取响应失败: %w", wrapReadErr(err))
+		}
+
+		_ = httpResp.Body.Close()
 		account.RecordFailure()
-		log.Infof("req summary responses-nonstream model=%s account=%s attempts=%d convert=%v upstream=%v total=%v (ERR)", baseModel, account.GetEmail(), attempts, convertDur, sendDur, time.Since(startTotal))
-		return nil, fmt.Errorf("读取响应失败: %w", wrapReadErr(err))
+		log.Infof("req summary responses-nonstream model=%s account=%s attempts=%d convert=%v upstream=%v total=%v (no completed)", baseModel, account.GetEmail(), attempts, convertDur, sendDur, time.Since(startTotal))
+		return nil, fmt.Errorf("未收到 response.completed 事件")
 	}
-
-	account.RecordFailure()
-	log.Infof("req summary responses-nonstream model=%s account=%s attempts=%d convert=%v upstream=%v total=%v (no completed)", baseModel, account.GetEmail(), attempts, convertDur, sendDur, time.Since(startTotal))
-	return nil, fmt.Errorf("未收到 response.completed 事件")
+	return nil, fmt.Errorf("读取响应失败")
 }
 
 func (e *Executor) OpenResponsesStream(ctx context.Context, rc RetryConfig, requestBody []byte, model string) (*RawResponse, *auth.Account, int, string, time.Duration, time.Duration, error) {

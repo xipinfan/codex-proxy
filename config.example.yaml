@@ -106,6 +106,9 @@ startup-async-load: true
 # 后台加载模式下，加载失败后重试间隔（秒）
 # startup-load-retry-interval: 10
 
+# 仅磁盘 JSON + startup-async-load：每批解析并入号池的文件数（默认 8000，不必等全部扫完即可选号）
+# startup-load-batch-size: 8000
+
 # 优雅关闭时等待 HTTP 请求完成的超时（秒，1-60）
 # shutdown-timeout: 5
 

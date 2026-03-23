@@ -59,11 +59,13 @@ type Config struct {
 	EnableHTTP2              bool `yaml:"enable-http2"`
 	StartupAsyncLoad         bool `yaml:"startup-async-load"`
 	StartupLoadRetryInterval int  `yaml:"startup-load-retry-interval"`
-	ShutdownTimeout          int  `yaml:"shutdown-timeout"`
-	AuthScanInterval         int  `yaml:"auth-scan-interval"`
-	SaveWorkers              int  `yaml:"save-workers"`
-	Cooldown401Sec           int  `yaml:"cooldown-401-sec"`
-	Cooldown429Sec           int  `yaml:"cooldown-429-sec"`
+	/* StartupLoadBatchSize 仅磁盘 JSON + startup-async-load：每批解析并入号池的文件数；0 表示用内置默认（8000） */
+	StartupLoadBatchSize int `yaml:"startup-load-batch-size"`
+	ShutdownTimeout      int `yaml:"shutdown-timeout"`
+	AuthScanInterval     int `yaml:"auth-scan-interval"`
+	SaveWorkers          int `yaml:"save-workers"`
+	Cooldown401Sec       int `yaml:"cooldown-401-sec"`
+	Cooldown429Sec       int `yaml:"cooldown-429-sec"`
 	/* RefreshSingleTimeoutSec 后台 Token 刷新 / 401 恢复等单次 OAuth 请求超时（秒），与对话 SSE 无关 */
 	RefreshSingleTimeoutSec int `yaml:"refresh-single-timeout-sec"`
 	/* RefreshHTTP429Action 刷新 token 遇 HTTP 429：cooldown | remove | disable（默认 cooldown） */
@@ -77,11 +79,12 @@ type Config struct {
 	QuotaHTTPStatusPolicy   map[string]map[string]string `yaml:"quota-http-status-policy"`
 	QuotaCheckConcurrency   int                          `yaml:"quota-check-concurrency"`
 	KeepaliveInterval       int                          `yaml:"keepalive-interval"`
-	EmptyRetryMax           int                          `yaml:"empty-retry-max"`
-	Selector                string                       `yaml:"selector"`
-	RefreshBatchSize        int                          `yaml:"refresh-batch-size"`
-	Accounts                []string                     `yaml:"accounts"`
-	APIKeys                 []string                     `yaml:"api-keys"`
+	/* EmptyRetryMax 非流式空结果时的换号次数；亦用于 responses 在读到 GOAWAY/断连等时的读阶段换号重试（至少 2 轮） */
+	EmptyRetryMax    int      `yaml:"empty-retry-max"`
+	Selector         string   `yaml:"selector"`
+	RefreshBatchSize int      `yaml:"refresh-batch-size"`
+	Accounts         []string `yaml:"accounts"`
+	APIKeys          []string `yaml:"api-keys"`
 
 	/* 入站 HTTP/2 (h2c) 等 */
 	EnableListenH2C            bool `yaml:"enable-listen-h2c"`
@@ -249,6 +252,9 @@ func (c *Config) Sanitize() {
 	}
 	if c.StartupLoadRetryInterval <= 0 {
 		c.StartupLoadRetryInterval = 10
+	}
+	if c.StartupLoadBatchSize < 0 {
+		c.StartupLoadBatchSize = 0
 	}
 	if c.ShutdownTimeout < 1 {
 		c.ShutdownTimeout = 5
