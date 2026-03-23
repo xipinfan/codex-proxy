@@ -26,17 +26,21 @@ import (
  * @field APIKeys - 可选的 API 访问密钥，用于保护代理服务
  */
 type Config struct {
-	Listen                 string `yaml:"listen"`
-	AuthDir                string `yaml:"auth-dir"`
-	DBEnabled              bool   `yaml:"db-enabled"`
-	DBDriver               string `yaml:"db-driver"`
-	DBHost                 string `yaml:"db-host"`
-	DBPort                 int    `yaml:"db-port"`
-	DBUser                 string `yaml:"db-user"`
-	DBPassword             string `yaml:"db-password"`
-	DBName                 string `yaml:"db-name"`
-	DBSSLMode              string `yaml:"db-sslmode"`
-	DBDSN                  string `yaml:"db-dsn"`
+	Listen     string `yaml:"listen"`
+	AuthDir    string `yaml:"auth-dir"`
+	DBEnabled  bool   `yaml:"db-enabled"`
+	DBDriver   string `yaml:"db-driver"`
+	DBHost     string `yaml:"db-host"`
+	DBPort     int    `yaml:"db-port"`
+	DBUser     string `yaml:"db-user"`
+	DBPassword string `yaml:"db-password"`
+	DBName     string `yaml:"db-name"`
+	DBSSLMode  string `yaml:"db-sslmode"`
+	DBDSN      string `yaml:"db-dsn"`
+	/* DBMaxOpenConns / DBMaxIdleConns 为 0 时按 refresh-concurrency 自动估算 */
+	DBMaxOpenConns         int    `yaml:"db-max-open-conns"`
+	DBMaxIdleConns         int    `yaml:"db-max-idle-conns"`
+	DBConnMaxLifetimeSec   int    `yaml:"db-conn-max-lifetime-sec"` /* 0 默认 1800（30m） */
 	ProxyURL               string `yaml:"proxy-url"`
 	BackendDomain          string `yaml:"backend-domain"`
 	BackendResolveAddress  string `yaml:"backend-resolve-address"`
@@ -61,7 +65,7 @@ type Config struct {
 	EnableHTTP2                 bool `yaml:"enable-http2"`
 	StartupAsyncLoad            bool `yaml:"startup-async-load"`
 	StartupLoadRetryInterval    int  `yaml:"startup-load-retry-interval"`
-	/* StartupLoadBatchSize 仅磁盘 JSON + startup-async-load：每批解析并入号池的文件数；0 表示用内置默认（8000） */
+	/* StartupLoadBatchSize startup-async-load：磁盘 JSON 每批解析文件数，或 db-enabled 时每批从库读取行数；0 表示内置默认（8000） */
 	StartupLoadBatchSize int `yaml:"startup-load-batch-size"`
 	ShutdownTimeout      int `yaml:"shutdown-timeout"`
 	AuthScanInterval     int `yaml:"auth-scan-interval"`
@@ -186,17 +190,43 @@ func (c *Config) Sanitize() {
 	if c.Listen == "" {
 		c.Listen = ":8080"
 	}
-	if c.AuthDir == "" {
+	if c.AuthDir == "" && !c.DBEnabled {
 		c.AuthDir = "./auths"
 	}
 	if c.DBDriver == "" {
 		c.DBDriver = "postgres"
 	}
+	c.DBDriver = normalizeDBDriver(c.DBDriver)
 	if c.DBPort == 0 {
-		c.DBPort = 5432
+		switch c.DBDriver {
+		case "mysql":
+			c.DBPort = 3306
+		case "sqlite":
+			/* 无 TCP 端口 */
+		default:
+			c.DBPort = 5432
+		}
 	}
 	if c.DBSSLMode == "" {
 		c.DBSSLMode = "disable"
+	}
+	if c.DBMaxOpenConns < 0 {
+		c.DBMaxOpenConns = 0
+	}
+	if c.DBMaxOpenConns > 512 {
+		c.DBMaxOpenConns = 512
+	}
+	if c.DBMaxIdleConns < 0 {
+		c.DBMaxIdleConns = 0
+	}
+	if c.DBMaxIdleConns > 512 {
+		c.DBMaxIdleConns = 512
+	}
+	if c.DBConnMaxLifetimeSec < 0 {
+		c.DBConnMaxLifetimeSec = 0
+	}
+	if c.DBConnMaxLifetimeSec > 7200 {
+		c.DBConnMaxLifetimeSec = 7200
 	}
 	/* 优先级：base-url（若配置） > backend-domain（自动拼接） */
 	if c.BaseURL != "" {
@@ -391,4 +421,18 @@ func normalizeNestedStringMap(m map[string]map[string]string) map[string]map[str
 		return nil
 	}
 	return out
+}
+
+func normalizeDBDriver(s string) string {
+	d := strings.ToLower(strings.TrimSpace(s))
+	switch d {
+	case "pg", "postgresql":
+		return "postgres"
+	case "mariadb":
+		return "mysql"
+	case "sqlite3":
+		return "sqlite"
+	default:
+		return d
+	}
 }

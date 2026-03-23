@@ -7,7 +7,7 @@ listen: ":8080"
 # 账号文件目录（存放 JSON 格式的 Codex 账号文件，DB 模式时可留空）
 auth-dir: "./auths"
 
-# 使用 PostgreSQL 存储账号
+# 使用数据库存储账号（db-driver: postgres | mysql | sqlite）
 # db-enabled: true
 # db-driver: postgres
 # db-host: 127.0.0.1
@@ -16,7 +16,23 @@ auth-dir: "./auths"
 # db-password: password
 # db-name: codex_proxy
 # db-sslmode: disable
-# db-dsn: ""  # 若配置则优先使用 DSN
+# db-dsn: ""  # 若配置则优先使用 DSN（各驱动原生连接串）
+# 连接池（0 表示按 refresh-concurrency 自动估算；db-conn-max-lifetime-sec 默认 1800）
+# db-max-open-conns: 0
+# db-max-idle-conns: 0
+# db-conn-max-lifetime-sec: 0
+#
+# MySQL 示例（db-port 默认 3306）:
+# db-driver: mysql
+# db-host: 127.0.0.1
+# db-port: 3306
+# db-user: root
+# db-password: secret
+# db-name: codex_proxy
+#
+# SQLite 示例（未配 db-dsn 时 db-name 为本地文件路径，默认 codex_proxy.db）:
+# db-driver: sqlite
+# db-name: "./data/codex.db"
 
 # 后端域名（所有 API 统一走 https://<backend-domain>/backend-api/...）
 # 与 base-url 二选一；当 base-url 已配置时，会自动按 base-url 的主机名推导 backend-domain
@@ -97,8 +113,8 @@ health-check-batch-size: 20
 # 定时健康检查单次请求超时（秒）；仅影响后台巡检，不影响对话 API
 health-check-request-timeout: 8
 
-# 仅磁盘 JSON（db-enabled: false）：周期将 *.json.disabled 还原为 .json，OAuth 刷新并同步查额度；不通过则删除凭据（不再改回 .disabled）。0 表示关闭。启动后约 90s 首次执行。
 # disabled-recovery-interval-sec: 3600
+# 仅磁盘 JSON（db-enabled: false）：周期将 *.json.disabled 还原为 .json，OAuth 刷新并同步查额度；不通过则删除凭据（不再改回 .disabled）。0 表示关闭。启动后约 90s 首次执行。
 
 # Token 并发刷新数（2w 账号建议 100-200）
 refresh-concurrency: 50
@@ -109,7 +125,7 @@ startup-async-load: true
 # 后台加载模式下，加载失败后重试间隔（秒）
 # startup-load-retry-interval: 10
 
-# 仅磁盘 JSON + startup-async-load：每批解析并入号池的文件数（默认 8000，不必等全部扫完即可选号）
+# startup-async-load：磁盘模式每批 JSON 文件数，或 db-enabled 时每批从库读取行数（默认 8000，不必等全量即可选号）
 # startup-load-batch-size: 8000
 
 # 优雅关闭时等待 HTTP 请求完成的超时（秒，1-60）

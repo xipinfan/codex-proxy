@@ -11,7 +11,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -20,12 +19,12 @@ import (
 
 	"codex-proxy/internal/auth"
 	"codex-proxy/internal/config"
+	codexdb "codex-proxy/internal/db"
 	"codex-proxy/internal/executor"
 	"codex-proxy/internal/handler"
 	"codex-proxy/internal/static"
 
 	"github.com/fasthttp/router"
-	_ "github.com/lib/pq"
 	log "github.com/sirupsen/logrus"
 	"github.com/valyala/fasthttp"
 )
@@ -42,75 +41,6 @@ const (
 	colorWhite  = "\033[97m"
 )
 
-func openOrCreatePostgres(cfg *config.Config) (*sql.DB, error) {
-	if cfg == nil {
-		return nil, fmt.Errorf("config is nil")
-	}
-
-	targetName := strings.TrimSpace(cfg.DBName)
-	if targetName == "" {
-		targetName = "codex_proxy"
-	}
-
-	dsn := strings.TrimSpace(cfg.DBDSN)
-	if dsn == "" {
-		dsn = fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=%s",
-			cfg.DBUser, cfg.DBPassword, cfg.DBHost, cfg.DBPort, targetName, cfg.DBSSLMode)
-	}
-
-	openDB := func(uri string) (*sql.DB, error) {
-		db, err := sql.Open(cfg.DBDriver, uri)
-		if err != nil {
-			return nil, err
-		}
-		if err = db.Ping(); err != nil {
-			_ = db.Close()
-			return nil, err
-		}
-		return db, nil
-	}
-
-	db, err := openDB(dsn)
-	if err == nil {
-		return db, nil
-	}
-
-	if !strings.Contains(err.Error(), "does not exist") && !strings.Contains(err.Error(), "不存在") {
-		return nil, err
-	}
-
-	// 尝试自动创建数据库
-	adminDSN := dsn
-	if cfg.DBDSN == "" {
-		adminDSN = fmt.Sprintf("postgres://%s:%s@%s:%d/postgres?sslmode=%s",
-			cfg.DBUser, cfg.DBPassword, cfg.DBHost, cfg.DBPort, cfg.DBSSLMode)
-	} else {
-		parsed, parseErr := url.Parse(cfg.DBDSN)
-		if parseErr == nil {
-			parsed.Path = "/postgres"
-			adminDSN = parsed.String()
-		}
-	}
-
-	adminDB, err := openDB(adminDSN)
-	if err != nil {
-		return nil, fmt.Errorf("admin DB 连接失败: %w", err)
-	}
-	defer adminDB.Close()
-
-	_, err = adminDB.Exec(fmt.Sprintf("CREATE DATABASE %s", pqQuote(targetName)))
-	if err != nil && !strings.Contains(err.Error(), "already exists") {
-		return nil, fmt.Errorf("创建数据库失败: %w", err)
-	}
-
-	// 重连目标数据库
-	return openDB(dsn)
-}
-
-func pqQuote(identifier string) string {
-	identifier = strings.ReplaceAll(identifier, "\"", "\\\"")
-	return "\"" + identifier + "\""
-}
 func main() {
 	/* 配置 logrus 彩色日志格式 */
 	log.SetFormatter(&log.TextFormatter{
@@ -130,7 +60,32 @@ func main() {
 
 	log.Infof("%s⚡ Codex Proxy 启动中...%s", colorCyan, colorReset)
 	log.Infof("监听地址: %s%s%s", colorGreen, cfg.Listen, colorReset)
-	log.Infof("账号目录: %s", cfg.AuthDir)
+	if cfg.DBEnabled {
+		switch cfg.DBDriver {
+		case "mysql":
+			log.Infof("%s持久化: MySQL（Token 直写数据库）%s — %s:%d/%s",
+				colorCyan, colorReset, cfg.DBHost, cfg.DBPort, strings.TrimSpace(cfg.DBName))
+		case "sqlite":
+			dsn := strings.TrimSpace(cfg.DBDSN)
+			if dsn == "" {
+				dsn = strings.TrimSpace(cfg.DBName)
+				if dsn == "" {
+					dsn = "codex_proxy.db"
+				}
+			}
+			log.Infof("%s持久化: SQLite（Token 直写数据库）%s — %s", colorCyan, colorReset, dsn)
+		default:
+			log.Infof("%s持久化: PostgreSQL（Token 直写数据库）%s — %s:%d/%s sslmode=%s",
+				colorCyan, colorReset, cfg.DBHost, cfg.DBPort, strings.TrimSpace(cfg.DBName), cfg.DBSSLMode)
+		}
+		if strings.TrimSpace(cfg.AuthDir) != "" {
+			log.Infof("账号目录（JSON 可导入 DB）: %s", cfg.AuthDir)
+		} else {
+			log.Infof("账号目录: （未配置，仅从数据库加载）")
+		}
+	} else {
+		log.Infof("账号目录: %s", cfg.AuthDir)
+	}
 	log.Infof("API 基础 URL: %s", cfg.BaseURL)
 	if cfg.ProxyURL != "" {
 		log.Infof("代理地址: %s%s%s", colorGreen, cfg.ProxyURL, colorReset)
@@ -148,18 +103,19 @@ func main() {
 
 	/* 数据库连接（可选）- 异步初始化以提升启动速度 */
 	var db *sql.DB
+	var dbDialect codexdb.Dialect
 	var dbInitDone = make(chan struct{})
 	if cfg.DBEnabled {
 		go func() {
 			defer close(dbInitDone)
 			var err error
-			db, err = openOrCreatePostgres(cfg)
+			db, dbDialect, err = codexdb.Open(cfg)
 			if err != nil {
 				log.Fatalf("数据库无法就绪: %v", err)
 			}
-			log.Infof("已连接数据库")
+			log.Infof("已连接数据库 (%s)", dbDialect.String())
 
-			if err = auth.SetupDB(db); err != nil {
+			if err = codexdb.SetupSchema(db, dbDialect); err != nil {
 				log.Fatalf("数据库初始化失败: %v", err)
 			}
 		}()
@@ -190,6 +146,7 @@ func main() {
 		RefreshHTTPStatusPolicy:       cfg.RefreshHTTPStatusPolicy,
 		QuotaHTTPStatusPolicy:         cfg.QuotaHTTPStatusPolicy,
 		Auth401SyncRefreshConcurrency: cfg.Auth401SyncRefreshConcurrency,
+		DBDialect:                     dbDialect,
 	}
 	manager := auth.NewManager(cfg.AuthDir, db, cfg.ProxyURL, cfg.RefreshInterval, selector, cfg.EnableHTTP2, managerOpts)
 	manager.SetRefreshConcurrency(cfg.RefreshConcurrency)

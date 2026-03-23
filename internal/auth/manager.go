@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,6 +14,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	codexdb "codex-proxy/internal/db"
 
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/sync/singleflight"
@@ -52,6 +55,8 @@ type ManagerOptions struct {
 	/* Auth401SyncRefreshConcurrency 请求路径上「401→同步 OAuth」的全局并发上限；0 表示不限制。
 	   高并发时打满 OAuth 易 429，槽满则直接换号（后台周期刷新仍会修 Token），减少无效刷新与 WARN 刷屏。 */
 	Auth401SyncRefreshConcurrency int
+	/* DBDialect 持久化时使用，与 internal/db 方言一致；零值等价于 PostgreSQL */
+	DBDialect codexdb.Dialect
 }
 
 /**
@@ -75,7 +80,9 @@ type Manager struct {
 	selector                Selector
 	authDir                 string
 	db                      *sql.DB
+	dbDialect               codexdb.Dialect
 	saveTokenStmt           *sql.Stmt
+	saveTokenStmtByEmail    *sql.Stmt
 	refreshInterval         int
 	refreshConcurrency      int
 	scanIntervalSec         int
@@ -128,6 +135,7 @@ func NewManager(authDir string, db *sql.DB, proxyURL string, refreshInterval int
 		stopCh:                  make(chan struct{}),
 	}
 	if opts != nil {
+		m.dbDialect = opts.DBDialect
 		if opts.AuthScanInterval > 0 {
 			m.scanIntervalSec = opts.AuthScanInterval
 		}
@@ -195,43 +203,70 @@ func (m *Manager) waitAccountRefreshIdle(ctx context.Context, acc *Account) bool
 	}
 }
 
-/**
- * SetupDB 初始化数据库表结构
- */
-func SetupDB(db *sql.DB) error {
-	if db == nil {
-		return nil
-	}
-	_, err := db.Exec(`
-CREATE TABLE IF NOT EXISTS codex_accounts (
-	id SERIAL PRIMARY KEY,
-	account_id TEXT UNIQUE,
-	email TEXT UNIQUE,
-	id_token TEXT,
-	access_token TEXT,
-	refresh_token TEXT,
-	expire TEXT,
-	plan_type TEXT,
-	last_refresh TIMESTAMPTZ,
-	updated_at TIMESTAMPTZ DEFAULT NOW()
-)
-`)
-	if err != nil {
-		return err
-	}
-	_, err = db.Exec(`CREATE INDEX IF NOT EXISTS idx_codex_accounts_updated_at ON codex_accounts(updated_at)`)
-	if err != nil {
-		return err
-	}
-	_, err = db.Exec(`CREATE INDEX IF NOT EXISTS idx_codex_accounts_refresh_token ON codex_accounts(refresh_token)`)
-	return err
-}
-
 func (m *Manager) prepareDBStatements() error {
 	if m.db == nil {
 		return nil
 	}
-	stmt, err := m.db.Prepare(`
+	switch m.dbDialect {
+	case codexdb.DialectMySQL:
+		s := `
+INSERT INTO codex_accounts (account_id,email,id_token,access_token,refresh_token,expire,plan_type,last_refresh,updated_at)
+VALUES (?,?,?,?,?,?,?,?,UTC_TIMESTAMP(6))
+ON DUPLICATE KEY UPDATE
+	email = VALUES(email),
+	account_id = VALUES(account_id),
+	id_token = VALUES(id_token),
+	access_token = VALUES(access_token),
+	refresh_token = VALUES(refresh_token),
+	expire = VALUES(expire),
+	plan_type = VALUES(plan_type),
+	last_refresh = VALUES(last_refresh),
+	updated_at = VALUES(updated_at)`
+		stmt, err := m.db.Prepare(s)
+		if err != nil {
+			return err
+		}
+		m.saveTokenStmt = stmt
+		m.saveTokenStmtByEmail = nil
+		return nil
+	case codexdb.DialectSQLite:
+		s1 := `
+INSERT INTO codex_accounts (account_id,email,id_token,access_token,refresh_token,expire,plan_type,last_refresh,updated_at)
+VALUES (?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)
+ON CONFLICT(account_id) DO UPDATE SET
+	email = excluded.email,
+	id_token = excluded.id_token,
+	access_token = excluded.access_token,
+	refresh_token = excluded.refresh_token,
+	expire = excluded.expire,
+	plan_type = excluded.plan_type,
+	last_refresh = excluded.last_refresh,
+	updated_at = CURRENT_TIMESTAMP`
+		stmt, err := m.db.Prepare(s1)
+		if err != nil {
+			return err
+		}
+		m.saveTokenStmt = stmt
+		s2 := `
+INSERT INTO codex_accounts (account_id,email,id_token,access_token,refresh_token,expire,plan_type,last_refresh,updated_at)
+VALUES (?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)
+ON CONFLICT(email) DO UPDATE SET
+	account_id = excluded.account_id,
+	id_token = excluded.id_token,
+	access_token = excluded.access_token,
+	refresh_token = excluded.refresh_token,
+	expire = excluded.expire,
+	plan_type = excluded.plan_type,
+	last_refresh = excluded.last_refresh,
+	updated_at = CURRENT_TIMESTAMP`
+		stmtEm, err := m.db.Prepare(s2)
+		if err != nil {
+			return err
+		}
+		m.saveTokenStmtByEmail = stmtEm
+		return nil
+	default:
+		s1 := `
 INSERT INTO codex_accounts (account_id,email,id_token,access_token,refresh_token,expire,plan_type,last_refresh,updated_at)
 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW())
 ON CONFLICT (account_id) DO UPDATE SET
@@ -242,13 +277,31 @@ ON CONFLICT (account_id) DO UPDATE SET
 	expire = EXCLUDED.expire,
 	plan_type = EXCLUDED.plan_type,
 	last_refresh = EXCLUDED.last_refresh,
-	updated_at = NOW()
-`)
-	if err != nil {
-		return err
+	updated_at = NOW()`
+		stmt, err := m.db.Prepare(s1)
+		if err != nil {
+			return err
+		}
+		m.saveTokenStmt = stmt
+		s2 := `
+INSERT INTO codex_accounts (account_id,email,id_token,access_token,refresh_token,expire,plan_type,last_refresh,updated_at)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW())
+ON CONFLICT (email) DO UPDATE SET
+	account_id = EXCLUDED.account_id,
+	id_token = EXCLUDED.id_token,
+	access_token = EXCLUDED.access_token,
+	refresh_token = EXCLUDED.refresh_token,
+	expire = EXCLUDED.expire,
+	plan_type = EXCLUDED.plan_type,
+	last_refresh = EXCLUDED.last_refresh,
+	updated_at = NOW()`
+		stmtEm, err := m.db.Prepare(s2)
+		if err != nil {
+			return err
+		}
+		m.saveTokenStmtByEmail = stmtEm
+		return nil
 	}
-	m.saveTokenStmt = stmt
-	return nil
 }
 
 /**
@@ -342,13 +395,46 @@ func (m *Manager) mergeAppendAccounts(newAccs []*Account) (added int) {
 }
 
 /**
- * LoadAccountsProgressive 按批读取磁盘 JSON 并入号池，无需等全部文件解析完即可选号（仅非 DB 模式）
+ * LoadAccountsProgressive 按批并入号池：磁盘模式解析 JSON；数据库模式按行分页查询（与 mergeAppendAccounts 复用）
  */
 func (m *Manager) LoadAccountsProgressive(ctx context.Context, batchSize int) error {
 	m.mu.Lock()
 	if m.db != nil {
 		m.mu.Unlock()
-		return m.LoadAccounts()
+		if batchSize < 1 {
+			batchSize = defaultStartupLoadBatch
+		}
+		if m.authDir != "" {
+			if _, err := m.importAccountsFromFilesToDB(); err != nil {
+				log.Warnf("从磁盘迁移账号到数据库失败: %v", err)
+			}
+		}
+		offset := 0
+		for {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
+			batch, rowCount, err := m.loadAccountsFromDBSlice(ctx, offset, batchSize)
+			if err != nil {
+				return fmt.Errorf("分批加载数据库账号失败: %w", err)
+			}
+			if rowCount == 0 {
+				break
+			}
+			added := m.mergeAppendAccounts(batch)
+			log.Infof("启动分批加载(DB): 本批从库读 %d 行、纳入 %d 个账号，号池累计 %d 个，OFFSET %d～%d",
+				rowCount, added, m.AccountCount(), offset, offset+rowCount-1)
+			offset += rowCount
+			if rowCount < batchSize {
+				break
+			}
+		}
+		if m.AccountCount() == 0 {
+			return fmt.Errorf("数据库中未找到有效账号")
+		}
+		return nil
 	}
 	authDir := m.authDir
 	m.mu.Unlock()
@@ -421,7 +507,7 @@ func (m *Manager) LoadAccounts() error {
 		m.publishSnapshot()
 		n := len(m.accounts)
 		m.mu.Unlock()
-		log.Infof("共加载 %d 个 Codex 账号（PostgreSQL）", n)
+		log.Infof("共加载 %d 个 Codex 账号（%s）", n, m.dbDialect.String())
 		return nil
 	}
 	authDir := m.authDir
@@ -459,27 +545,12 @@ func (m *Manager) LoadAccounts() error {
 }
 
 /**
- * loadAccountFromFile 从单个 JSON 文件加载账号
- * @param filePath - 文件路径
- * @returns *Account - 账号对象
- * @returns error - 加载失败时返回错误
+ * accountFromTokenFile 由 TokenFile 构造账号（与磁盘 JSON、导入 DB 共用）
  */
-func loadAccountFromFile(filePath string) (*Account, error) {
-	data, err := os.ReadFile(filePath)
-	if err != nil {
-		return nil, fmt.Errorf("读取文件失败: %w", err)
-	}
-
-	var tf TokenFile
-	if err = json.Unmarshal(data, &tf); err != nil {
-		return nil, fmt.Errorf("解析 JSON 失败: %w", err)
-	}
-
+func accountFromTokenFile(tf *TokenFile, logicalPath string) (*Account, error) {
 	if tf.RefreshToken == "" {
-		return nil, fmt.Errorf("文件中缺少 refresh_token")
+		return nil, fmt.Errorf("缺少 refresh_token")
 	}
-
-	/* 从 ID Token 中补充解析 AccountID、Email、PlanType */
 	accountID := tf.AccountID
 	email := tf.Email
 	var planType string
@@ -493,9 +564,8 @@ func loadAccountFromFile(filePath string) (*Account, error) {
 		}
 		planType = jwtPlan
 	}
-
 	acc := &Account{
-		FilePath: filePath,
+		FilePath: logicalPath,
 		Token: TokenData{
 			IDToken:      tf.IDToken,
 			AccessToken:  tf.AccessToken,
@@ -511,12 +581,97 @@ func loadAccountFromFile(filePath string) (*Account, error) {
 	return acc, nil
 }
 
+/**
+ * loadAccountFromFile 从单个 JSON 文件加载账号
+ * @param filePath - 文件路径
+ * @returns *Account - 账号对象
+ * @returns error - 加载失败时返回错误
+ */
+func loadAccountFromFile(filePath string) (*Account, error) {
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("读取文件失败: %w", err)
+	}
+	var tf TokenFile
+	if err = json.Unmarshal(data, &tf); err != nil {
+		return nil, fmt.Errorf("解析 JSON 失败: %w", err)
+	}
+	return accountFromTokenFile(&tf, filePath)
+}
+
+func accountFromDBRow(id int64, accountID, email, idToken, accessToken, refreshToken, expire, planType sql.NullString, lastRefresh sql.NullTime) (*Account, bool) {
+	if refreshToken.String == "" {
+		return nil, false
+	}
+	key := "db:" + accountID.String
+	if accountID.String == "" {
+		key = "db:" + email.String
+	}
+	if key == "db:" {
+		key = fmt.Sprintf("db:id:%d", id)
+	}
+	acc := &Account{
+		FilePath: key,
+		Token: TokenData{
+			IDToken:      idToken.String,
+			AccessToken:  accessToken.String,
+			RefreshToken: refreshToken.String,
+			AccountID:    accountID.String,
+			Email:        email.String,
+			Expire:       expire.String,
+			PlanType:     planType.String,
+		},
+		Status:          StatusActive,
+		LastRefreshedAt: lastRefresh.Time,
+	}
+	if lastRefresh.Valid {
+		acc.lastRefreshMs.Store(lastRefresh.Time.UnixMilli())
+	}
+	acc.SyncAccessExpireFromToken()
+	return acc, true
+}
+
+/* loadAccountsFromDBSlice 返回有效账号与本次从库迭代的行数（含无 refresh_token 等被跳过的行），供 OFFSET 与磁盘「按批处理文件数」语义对齐 */
+func (m *Manager) loadAccountsFromDBSlice(ctx context.Context, offset, limit int) ([]*Account, int, error) {
+	if m.db == nil {
+		return nil, 0, nil
+	}
+	base := `SELECT id, account_id,email,id_token,access_token,refresh_token,expire,plan_type,last_refresh FROM codex_accounts ORDER BY id`
+	var rows *sql.Rows
+	var err error
+	switch m.dbDialect {
+	case codexdb.DialectPostgres:
+		rows, err = m.db.QueryContext(ctx, base+` LIMIT $1 OFFSET $2`, limit, offset)
+	default:
+		rows, err = m.db.QueryContext(ctx, base+` LIMIT ? OFFSET ?`, limit, offset)
+	}
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	out := make([]*Account, 0, limit)
+	rowCount := 0
+	for rows.Next() {
+		rowCount++
+		var id int64
+		var accountID, email, idToken, accessToken, refreshToken, expire, planType sql.NullString
+		var lastRefresh sql.NullTime
+		if err := rows.Scan(&id, &accountID, &email, &idToken, &accessToken, &refreshToken, &expire, &planType, &lastRefresh); err != nil {
+			log.Warnf("读取数据库账号失败: %v", err)
+			continue
+		}
+		if acc, ok := accountFromDBRow(id, accountID, email, idToken, accessToken, refreshToken, expire, planType, lastRefresh); ok {
+			out = append(out, acc)
+		}
+	}
+	return out, rowCount, rows.Err()
+}
+
 func (m *Manager) loadAccountsFromDB() error {
 	if m.db == nil {
 		return nil
 	}
-
-	rows, err := m.db.Query(`SELECT account_id,email,id_token,access_token,refresh_token,expire,plan_type,last_refresh FROM codex_accounts`)
+	rows, err := m.db.Query(`SELECT id, account_id,email,id_token,access_token,refresh_token,expire,plan_type,last_refresh FROM codex_accounts ORDER BY id`)
 	if err != nil {
 		return err
 	}
@@ -526,44 +681,19 @@ func (m *Manager) loadAccountsFromDB() error {
 	index := make(map[string]*Account)
 
 	for rows.Next() {
+		var id int64
 		var accountID, email, idToken, accessToken, refreshToken, expire, planType sql.NullString
 		var lastRefresh sql.NullTime
-		if err := rows.Scan(&accountID, &email, &idToken, &accessToken, &refreshToken, &expire, &planType, &lastRefresh); err != nil {
+		if err := rows.Scan(&id, &accountID, &email, &idToken, &accessToken, &refreshToken, &expire, &planType, &lastRefresh); err != nil {
 			log.Warnf("读取数据库账号失败: %v", err)
 			continue
 		}
-		if refreshToken.String == "" {
+		acc, ok := accountFromDBRow(id, accountID, email, idToken, accessToken, refreshToken, expire, planType, lastRefresh)
+		if !ok {
 			continue
 		}
-		key := "db:" + accountID.String
-		if accountID.String == "" {
-			key = "db:" + email.String
-		}
-		if key == "db:" {
-			key = fmt.Sprintf("db:%d", len(accounts)+1)
-		}
-
-		acc := &Account{
-			FilePath: key,
-			Token: TokenData{
-				IDToken:      idToken.String,
-				AccessToken:  accessToken.String,
-				RefreshToken: refreshToken.String,
-				AccountID:    accountID.String,
-				Email:        email.String,
-				Expire:       expire.String,
-				PlanType:     planType.String,
-			},
-			Status:          StatusActive,
-			LastRefreshedAt: lastRefresh.Time,
-		}
-		if lastRefresh.Valid {
-			acc.lastRefreshMs.Store(lastRefresh.Time.UnixMilli())
-		}
-		acc.SyncAccessExpireFromToken()
-
 		accounts = append(accounts, acc)
-		index[key] = acc
+		index[acc.FilePath] = acc
 	}
 
 	if err := rows.Err(); err != nil {
@@ -637,12 +767,59 @@ func (m *Manager) saveTokenToDB(acc *Account) error {
 	acc.mu.RLock()
 	defer acc.mu.RUnlock()
 
+	args := []any{acc.Token.AccountID, acc.Token.Email, acc.Token.IDToken, acc.Token.AccessToken, acc.Token.RefreshToken, acc.Token.Expire, acc.Token.PlanType, acc.LastRefreshedAt}
+	aid := strings.TrimSpace(acc.Token.AccountID)
+	em := strings.TrimSpace(acc.Token.Email)
+
+	if m.dbDialect == codexdb.DialectMySQL && m.saveTokenStmt != nil {
+		_, err := m.saveTokenStmt.Exec(args...)
+		return err
+	}
+	if aid != "" && m.saveTokenStmt != nil {
+		_, err := m.saveTokenStmt.Exec(args...)
+		return err
+	}
+	if aid == "" && em != "" && m.saveTokenStmtByEmail != nil {
+		_, err := m.saveTokenStmtByEmail.Exec(args...)
+		return err
+	}
 	if m.saveTokenStmt != nil {
-		_, err := m.saveTokenStmt.Exec(acc.Token.AccountID, acc.Token.Email, acc.Token.IDToken, acc.Token.AccessToken, acc.Token.RefreshToken, acc.Token.Expire, acc.Token.PlanType, acc.LastRefreshedAt)
+		_, err := m.saveTokenStmt.Exec(args...)
 		return err
 	}
 
-	_, err := m.db.Exec(`
+	switch m.dbDialect {
+	case codexdb.DialectMySQL:
+		_, err := m.db.Exec(`
+INSERT INTO codex_accounts (account_id,email,id_token,access_token,refresh_token,expire,plan_type,last_refresh,updated_at)
+VALUES (?,?,?,?,?,?,?,?,UTC_TIMESTAMP(6))
+ON DUPLICATE KEY UPDATE
+	email = VALUES(email),
+	account_id = VALUES(account_id),
+	id_token = VALUES(id_token),
+	access_token = VALUES(access_token),
+	refresh_token = VALUES(refresh_token),
+	expire = VALUES(expire),
+	plan_type = VALUES(plan_type),
+	last_refresh = VALUES(last_refresh),
+	updated_at = VALUES(updated_at)`, args...)
+		return err
+	case codexdb.DialectSQLite:
+		_, err := m.db.Exec(`
+INSERT INTO codex_accounts (account_id,email,id_token,access_token,refresh_token,expire,plan_type,last_refresh,updated_at)
+VALUES (?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)
+ON CONFLICT(account_id) DO UPDATE SET
+	email = excluded.email,
+	id_token = excluded.id_token,
+	access_token = excluded.access_token,
+	refresh_token = excluded.refresh_token,
+	expire = excluded.expire,
+	plan_type = excluded.plan_type,
+	last_refresh = excluded.last_refresh,
+	updated_at = CURRENT_TIMESTAMP`, args...)
+		return err
+	default:
+		_, err := m.db.Exec(`
 INSERT INTO codex_accounts (account_id,email,id_token,access_token,refresh_token,expire,plan_type,last_refresh,updated_at)
 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW())
 ON CONFLICT (account_id) DO UPDATE SET
@@ -653,35 +830,65 @@ ON CONFLICT (account_id) DO UPDATE SET
 	expire = EXCLUDED.expire,
 	plan_type = EXCLUDED.plan_type,
 	last_refresh = EXCLUDED.last_refresh,
-	updated_at = NOW()
-`, acc.Token.AccountID, acc.Token.Email, acc.Token.IDToken, acc.Token.AccessToken, acc.Token.RefreshToken, acc.Token.Expire, acc.Token.PlanType, acc.LastRefreshedAt)
-
-	return err
+	updated_at = NOW()`, args...)
+		return err
+	}
 }
 
 func (m *Manager) accountExists(acc *Account) (bool, error) {
 	if m.db == nil {
 		return false, nil
 	}
-
-	var count int
-	if err := m.db.QueryRow(`SELECT COUNT(1) FROM codex_accounts WHERE email=$1 OR account_id=$2`, acc.GetEmail(), acc.GetAccountID()).Scan(&count); err != nil {
-		return false, err
+	email := strings.TrimSpace(acc.GetEmail())
+	aid := strings.TrimSpace(acc.GetAccountID())
+	if email != "" {
+		var one int
+		var err error
+		if m.dbDialect == codexdb.DialectPostgres {
+			err = m.db.QueryRow(`SELECT 1 FROM codex_accounts WHERE email=$1 LIMIT 1`, email).Scan(&one)
+		} else {
+			err = m.db.QueryRow(`SELECT 1 FROM codex_accounts WHERE email=? LIMIT 1`, email).Scan(&one)
+		}
+		if err == nil {
+			return true, nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return false, err
+		}
 	}
-	return count > 0, nil
+	if aid != "" {
+		var one int
+		var err error
+		if m.dbDialect == codexdb.DialectPostgres {
+			err = m.db.QueryRow(`SELECT 1 FROM codex_accounts WHERE account_id=$1 LIMIT 1`, aid).Scan(&one)
+		} else {
+			err = m.db.QueryRow(`SELECT 1 FROM codex_accounts WHERE account_id=? LIMIT 1`, aid).Scan(&one)
+		}
+		if err == nil {
+			return true, nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return false, err
+		}
+	}
+	return false, nil
 }
 
 func (m *Manager) deleteAccountFromDB(acc *Account) error {
 	if m.db == nil {
 		return nil
 	}
-
-	result, err := m.db.Exec(`DELETE FROM codex_accounts WHERE email=$1 OR account_id=$2`, acc.GetEmail(), acc.GetAccountID())
+	var result sql.Result
+	var err error
+	if m.dbDialect == codexdb.DialectPostgres {
+		result, err = m.db.Exec(`DELETE FROM codex_accounts WHERE email=$1 OR account_id=$2`, acc.GetEmail(), acc.GetAccountID())
+	} else {
+		result, err = m.db.Exec(`DELETE FROM codex_accounts WHERE email=? OR account_id=?`, acc.GetEmail(), acc.GetAccountID())
+	}
 	if err != nil {
 		return err
 	}
 	_, _ = result.RowsAffected()
-	// 重复删除也视为成功
 	return nil
 }
 
