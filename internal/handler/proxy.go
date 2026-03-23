@@ -79,15 +79,19 @@ type ProxyHandler struct {
  * @param exec - Codex 执行器
  * @param apiKeys - API Key 列表
  * @param maxRetry - 最大重试次数（0 表示不重试）
- * @param quotaCheckConcurrency - 额度查询并发数（来自 config）
+ * @param quotaCheckConcurrency - 额度查询并发数（来自 config；quotaChecker 为 nil 新建 checker 时用）
+ * @param quotaChecker - 与 main 注入 Manager 的同一实例（wham/usage）；nil 时内部新建
  * @returns *ProxyHandler - 代理处理器实例
  */
-func NewProxyHandler(manager *auth.Manager, exec *executor.Executor, apiKeys []string, maxRetry int, enableHealthyRetry bool, proxyURL string, baseURL string, enableHTTP2 bool, backendDomain string, backendResolveAddress string, quotaCheckConcurrency int, emptyRetryMax int, indexHTML []byte) *ProxyHandler {
+func NewProxyHandler(manager *auth.Manager, exec *executor.Executor, apiKeys []string, maxRetry int, enableHealthyRetry bool, proxyURL string, baseURL string, enableHTTP2 bool, backendDomain string, backendResolveAddress string, quotaCheckConcurrency int, quotaChecker *auth.QuotaChecker, emptyRetryMax int, indexHTML []byte) *ProxyHandler {
 	if maxRetry < 0 {
 		maxRetry = 0
 	}
 	if quotaCheckConcurrency <= 0 {
 		quotaCheckConcurrency = 50
+	}
+	if quotaChecker == nil {
+		quotaChecker = auth.NewQuotaChecker(baseURL, proxyURL, quotaCheckConcurrency, enableHTTP2, backendDomain, backendResolveAddress)
 	}
 	return &ProxyHandler{
 		manager:            manager,
@@ -95,7 +99,7 @@ func NewProxyHandler(manager *auth.Manager, exec *executor.Executor, apiKeys []s
 		apiKeys:            apiKeys,
 		maxRetry:           maxRetry,
 		enableHealthyRetry: enableHealthyRetry,
-		quotaChecker:       auth.NewQuotaChecker(baseURL, proxyURL, quotaCheckConcurrency, enableHTTP2, backendDomain, backendResolveAddress),
+		quotaChecker:       quotaChecker,
 		indexHTML:          indexHTML,
 		emptyRetryMax:      emptyRetryMax,
 	}

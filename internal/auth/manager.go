@@ -93,6 +93,8 @@ type Manager struct {
 	auth401SF singleflight.Group
 	/* auth401SyncSem 非 nil 时限制全局同步 OAuth 并发（recoverAuth401Once 内 acquire） */
 	auth401SyncSem chan struct{}
+	/* postRefreshQuota OAuth 刷新成功后用于立刻校验 wham/usage；nil 表示不校验（由 SetPostRefreshQuotaChecker 注入） */
+	postRefreshQuota atomic.Pointer[QuotaChecker]
 }
 
 /**
@@ -710,7 +712,11 @@ func (m *Manager) PickExcluding(model string, excluded map[string]bool) (*Accoun
 		return m.selector.Pick(model, allAccounts)
 	}
 
-	filtered := make([]*Account, 0, len(allAccounts)-len(excluded))
+	capFiltered := len(allAccounts) - len(excluded)
+	if capFiltered < 0 {
+		capFiltered = 0
+	}
+	filtered := make([]*Account, 0, capFiltered)
 	for _, acc := range allAccounts {
 		if !excluded[acc.FilePath] {
 			filtered = append(filtered, acc)
@@ -739,6 +745,9 @@ func (m *Manager) PickRecentlySuccessful(model string, excluded map[string]bool)
 	for _, acc := range allAccounts {
 		st := AccountStatus(acc.atomicStatus.Load())
 		if st == StatusDisabled || st == StatusCooldown {
+			continue
+		}
+		if acc.quotaProbeInFlight.Load() > 0 {
 			continue
 		}
 		t := acc.GetLastUsedAt()
@@ -1176,6 +1185,102 @@ func (m *Manager) ApplyQuotaUsageHTTPOutcome(ctx context.Context, qc *QuotaCheck
 }
 
 /**
+ * SetPostRefreshQuotaChecker 设置「刷新成功后」用于校验 wham/usage 的查询器；nil 表示关闭该校验
+ */
+func (m *Manager) SetPostRefreshQuotaChecker(qc *QuotaChecker) {
+	if m == nil {
+		return
+	}
+	m.postRefreshQuota.Store(qc)
+}
+
+func (m *Manager) effectiveQuotaAfterRefresh(qcArg *QuotaChecker) *QuotaChecker {
+	if qcArg != nil {
+		return qcArg
+	}
+	if m == nil {
+		return nil
+	}
+	return m.postRefreshQuota.Load()
+}
+
+/**
+ * afterRefreshValidateQuota OAuth 刷新成功后同步查额度（401 恢复路径）；4xx 无效（非 429）删号。返回 false 表示已 RemoveAccount。
+ */
+func (m *Manager) afterRefreshValidateQuota(ctx context.Context, qc *QuotaChecker, acc *Account) bool {
+	if qc == nil || acc == nil {
+		return true
+	}
+	return m.applyPostRefreshQuotaOutcome(ctx, qc, acc, false)
+}
+
+/**
+ * runAsyncPostRefreshQuotaCheck 周期/强制刷新后的异步额度探测（不在选号池中直至探测结束）
+ */
+func (m *Manager) runAsyncPostRefreshQuotaCheck(ctx context.Context, acc *Account) {
+	qc := m.postRefreshQuota.Load()
+	if qc == nil || acc == nil {
+		return
+	}
+	fp := acc.FilePath
+	m.mu.RLock()
+	still := fp != "" && m.accountIndex[fp] == acc
+	m.mu.RUnlock()
+	if !still {
+		return
+	}
+	_ = m.applyPostRefreshQuotaOutcome(ctx, qc, acc, true)
+}
+
+/* applyPostRefreshQuotaOutcome 根据 wham/usage 结果处理账号；asyncLog 为 true 时用「异步」文案 */
+func (m *Manager) applyPostRefreshQuotaOutcome(ctx context.Context, qc *QuotaChecker, acc *Account, asyncLog bool) bool {
+	verdict, st := qc.CheckAccountResultWithStatus(ctx, acc)
+	switch verdict {
+	case 1:
+		acc.RefreshUsedPercent()
+		return true
+	case 2:
+		_ = m.ApplyQuotaUsageHTTPOutcome(ctx, qc, acc, st, verdict)
+		return true
+	case -1:
+		if asyncLog {
+			log.Warnf("账号 [%s] OAuth 刷新成功但异步额度查询无效 (HTTP %d)，视为凭据无效已删除", acc.GetEmail(), st)
+		} else {
+			log.Warnf("账号 [%s] OAuth 刷新成功但额度查询无效 (HTTP %d)，视为凭据无效已删除", acc.GetEmail(), st)
+		}
+		m.RemoveAccount(acc, ReasonQuotaInvalidAfterRefresh)
+		return false
+	default:
+		if asyncLog {
+			log.Debugf("账号 [%s] 刷新后异步额度查询暂态失败 (HTTP %d)，保留账号", acc.GetEmail(), st)
+		} else {
+			log.Debugf("账号 [%s] 刷新后额度查询暂态失败 (HTTP %d)，保留账号", acc.GetEmail(), st)
+		}
+		return true
+	}
+}
+
+/**
+ * spawnPostRefreshQuotaProbe OAuth 成功后启动异步额度校验；校验完成前账号不参与选号
+ */
+func (m *Manager) spawnPostRefreshQuotaProbe(acc *Account) {
+	if m == nil || acc == nil || m.postRefreshQuota.Load() == nil {
+		return
+	}
+	acc.quotaProbeInFlight.Add(1)
+	m.InvalidateSelectorCache()
+	go func(a *Account) {
+		defer func() {
+			a.quotaProbeInFlight.Add(-1)
+			m.InvalidateSelectorCache()
+		}()
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		m.runAsyncPostRefreshQuotaCheck(ctx, a)
+	}(acc)
+}
+
+/**
  * StartRefreshLoop 启动后台 Token 刷新循环
  * 每个周期：先扫描新增文件 → 再并发刷新所有账号
  * @param ctx - 上下文，用于控制生命周期
@@ -1563,12 +1668,6 @@ func (m *Manager) ForceRefreshAllStream(ctx context.Context, quotaChecker *Quota
 
 				ok := m.forceRefreshAccount(ctx, a)
 
-				/* 刷新成功后同时查询额度 */
-				if ok && quotaChecker != nil {
-					quotaChecker.CheckOne(ctx, a)
-					a.RefreshUsedPercent()
-				}
-
 				email := a.GetEmail()
 				cur := int(currentIdx.Add(1))
 				if ok {
@@ -1645,7 +1744,8 @@ func (m *Manager) forceRefreshAccount(ctx context.Context, acc *Account) bool {
 
 	acc.UpdateToken(*td)
 	m.enqueueSave(acc)
-	log.Infof("账号 [%s] 刷新成功", td.Email)
+	log.Infof("账号 [%s] 刷新成功", acc.GetEmail())
+	m.spawnPostRefreshQuotaProbe(acc)
 	return true
 }
 
@@ -1713,7 +1813,30 @@ func (m *Manager) RecoverAuth401(ctx context.Context, acc *Account, qc *QuotaChe
 	v, _, _ := m.auth401SF.Do(key, func() (interface{}, error) {
 		return m.recoverAuth401Once(ctx, acc, qc), nil
 	})
-	return v.(Auth401RecoverResult)
+	out := v.(Auth401RecoverResult)
+	/* singleflight 只执行首个闭包的 recover；等待方 *Account 可能与执行方不同指针，需把已刷新的凭据同步到当前 acc */
+	if out.Status == Auth401RecoverRefreshed {
+		m.syncAccountTokenAfter401Flight(acc)
+	}
+	return out
+}
+
+/* syncAccountTokenAfter401Flight 若索引中的 canonical 账号已含更新后的 Token，合并到 caller（caller 非 canonical 时） */
+func (m *Manager) syncAccountTokenAfter401Flight(caller *Account) {
+	if caller == nil {
+		return
+	}
+	fp := caller.FilePath
+	if fp == "" {
+		return
+	}
+	m.mu.RLock()
+	src := m.accountIndex[fp]
+	m.mu.RUnlock()
+	if src == nil || src == caller {
+		return
+	}
+	caller.UpdateToken(src.TokenSnapshot())
 }
 
 func (m *Manager) recoverAuth401Once(ctx context.Context, acc *Account, qc *QuotaChecker) Auth401RecoverResult {
@@ -1768,20 +1891,36 @@ func (m *Manager) recoverAuth401Once(ctx context.Context, acc *Account, qc *Quot
 	td, err := m.refresher.RefreshTokenWithRetry(rctx, refreshToken, 3)
 	if err == nil {
 		acc.UpdateToken(*td)
+		qcEff := m.effectiveQuotaAfterRefresh(qc)
+		if qcEff != nil && !m.afterRefreshValidateQuota(rctx, qcEff, acc) {
+			out.Status = Auth401RecoverRemoved
+			out.ReasonCode = ReasonQuotaInvalidAfterRefresh
+			out.Detail = "刷新成功但额度接口判无效，已删号"
+			m.InvalidateSelectorCache()
+			return out
+		}
 		if err := m.saveTokenToFile(acc); err != nil {
-			log.Errorf("账号 [%s] 401 刷新成功但持久化失败: %v", td.Email, err)
+			log.Errorf("账号 [%s] 401 刷新成功但持久化失败: %v", acc.GetEmail(), err)
 			out.Detail = "persist error: " + err.Error()
 		}
 		m.enqueueSave(acc)
 		acc.SetActive()
 		m.InvalidateSelectorCache()
-		log.Infof("账号 [%s] 401 后刷新成功，已恢复可用", td.Email)
+		log.Infof("账号 [%s] 401 后刷新成功，已恢复可用", acc.GetEmail())
 		out.Status = Auth401RecoverRefreshed
 		return out
 	}
 
 	recovered, qOut := m.handleRefreshHTTPError(rctx, acc, email, err, false)
 	if recovered {
+		qcEff := m.effectiveQuotaAfterRefresh(qc)
+		if qcEff != nil && !m.afterRefreshValidateQuota(rctx, qcEff, acc) {
+			out.Status = Auth401RecoverRemoved
+			out.ReasonCode = ReasonQuotaInvalidAfterRefresh
+			out.Detail = "刷新恢复后额度接口判无效，已删号"
+			m.InvalidateSelectorCache()
+			return out
+		}
 		acc.SetActive()
 		m.InvalidateSelectorCache()
 		out.Status = Auth401RecoverRefreshed
@@ -1930,7 +2069,8 @@ func (m *Manager) refreshAccount(ctx context.Context, acc *Account) {
 
 	acc.UpdateToken(*td)
 	m.enqueueSave(acc)
-	log.Infof("账号 [%s] 刷新成功", td.Email)
+	log.Infof("账号 [%s] 刷新成功", acc.GetEmail())
+	m.spawnPostRefreshQuotaProbe(acc)
 }
 
 /**

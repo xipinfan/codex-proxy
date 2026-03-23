@@ -6,6 +6,7 @@ package auth
 
 import (
 	"encoding/json"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -107,6 +108,9 @@ type Account struct {
 
 	/* 上游 429 后的额度恢复流程，防止同一账号堆积多个恢复 goroutine */
 	upstream429Recovering atomic.Int32
+
+	/* quotaProbeInFlight OAuth 刷新成功后异步 wham/usage 进行中的计数；>0 时不参与选号，额度 200 确认后才视为正常可用 */
+	quotaProbeInFlight atomic.Int32
 }
 
 /**
@@ -138,6 +142,8 @@ const (
 	ReasonRefresh429 = "refresh_http_429"
 	/* ReasonQuotaHTTP429 额度查询接口返回 HTTP 429 */
 	ReasonQuotaHTTP429 = "quota_http_429"
+	/* ReasonQuotaInvalidAfterRefresh OAuth 刷新成功但 wham/usage 返回无效（非 200 且非 429），视为废号 */
+	ReasonQuotaInvalidAfterRefresh = "quota_invalid_after_refresh"
 )
 
 /**
@@ -279,18 +285,41 @@ func (a *Account) GetLastUsedAt() time.Time {
 }
 
 /**
+ * TokenSnapshot 返回当前 Token 副本（持锁短读，供合并或跨账号同步）
+ */
+func (a *Account) TokenSnapshot() TokenData {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.Token
+}
+
+/**
  * UpdateToken 安全更新 Token 数据
+ * OAuth 刷新响应常省略 refresh_token / id_token；缺省时保留旧值，避免清空 Chatgpt-Account-Id 等导致刷新成功仍连续 401
  * @param td - 新的 Token 数据
  */
 func (a *Account) UpdateToken(td TokenData) {
 	now := time.Now()
+	a.mu.Lock()
+	prev := a.Token
+	if td.RefreshToken == "" {
+		td.RefreshToken = prev.RefreshToken
+	}
+	if strings.TrimSpace(td.AccountID) == "" {
+		td.AccountID = prev.AccountID
+	}
+	if strings.TrimSpace(td.Email) == "" {
+		td.Email = prev.Email
+	}
+	if td.IDToken == "" {
+		td.IDToken = prev.IDToken
+	}
 	var expMs int64
 	if td.Expire != "" {
 		if t, err := time.Parse(time.RFC3339, td.Expire); err == nil {
 			expMs = t.UnixMilli()
 		}
 	}
-	a.mu.Lock()
 	a.Token = td
 	a.LastRefreshedAt = now
 	a.Status = StatusActive
