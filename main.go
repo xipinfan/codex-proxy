@@ -174,17 +174,18 @@ func main() {
 		selector = auth.NewRoundRobinSelector()
 	}
 	managerOpts := &auth.ManagerOptions{
-		AuthScanInterval:        cfg.AuthScanInterval,
-		SaveWorkers:             cfg.SaveWorkers,
-		Cooldown401Sec:          cfg.Cooldown401Sec,
-		Cooldown429Sec:          cfg.Cooldown429Sec,
-		RefreshSingleTimeoutSec: cfg.RefreshSingleTimeoutSec,
-		RefreshBatchSize:        cfg.RefreshBatchSize,
-		RefreshHTTP429Action:    cfg.RefreshHTTP429Action,
-		QuotaHTTP429Action:      cfg.QuotaHTTP429Action,
-		QuotaHTTPStatusActions:  cfg.QuotaHTTPStatusActions,
-		RefreshHTTPStatusPolicy: cfg.RefreshHTTPStatusPolicy,
-		QuotaHTTPStatusPolicy:   cfg.QuotaHTTPStatusPolicy,
+		AuthScanInterval:              cfg.AuthScanInterval,
+		SaveWorkers:                   cfg.SaveWorkers,
+		Cooldown401Sec:                cfg.Cooldown401Sec,
+		Cooldown429Sec:                cfg.Cooldown429Sec,
+		RefreshSingleTimeoutSec:       cfg.RefreshSingleTimeoutSec,
+		RefreshBatchSize:              cfg.RefreshBatchSize,
+		RefreshHTTP429Action:          cfg.RefreshHTTP429Action,
+		QuotaHTTP429Action:            cfg.QuotaHTTP429Action,
+		QuotaHTTPStatusActions:        cfg.QuotaHTTPStatusActions,
+		RefreshHTTPStatusPolicy:       cfg.RefreshHTTPStatusPolicy,
+		QuotaHTTPStatusPolicy:         cfg.QuotaHTTPStatusPolicy,
+		Auth401SyncRefreshConcurrency: cfg.Auth401SyncRefreshConcurrency,
 	}
 	manager := auth.NewManager(cfg.AuthDir, db, cfg.ProxyURL, cfg.RefreshInterval, selector, cfg.EnableHTTP2, managerOpts)
 	manager.SetRefreshConcurrency(cfg.RefreshConcurrency)

@@ -49,6 +49,9 @@ type ManagerOptions struct {
 	RefreshHTTPStatusPolicy map[string]map[string]string
 	/* QuotaHTTPStatusPolicy 额度 wham/usage 同上；未出现在表中的状态码走简单逻辑（一般 4xx 直接 remove） */
 	QuotaHTTPStatusPolicy map[string]map[string]string
+	/* Auth401SyncRefreshConcurrency 请求路径上「401→同步 OAuth」的全局并发上限；0 表示不限制。
+	   高并发时打满 OAuth 易 429，槽满则直接换号（后台周期刷新仍会修 Token），减少无效刷新与 WARN 刷屏。 */
+	Auth401SyncRefreshConcurrency int
 }
 
 /**
@@ -88,6 +91,8 @@ type Manager struct {
 	quotaHTTPPolicy         map[int]httpStatusPolicy
 	/* auth401SF 合并同一凭据文件的并发 401 恢复，避免多请求重复打 OAuth */
 	auth401SF singleflight.Group
+	/* auth401SyncSem 非 nil 时限制全局同步 OAuth 并发（recoverAuth401Once 内 acquire） */
+	auth401SyncSem chan struct{}
 }
 
 /**
@@ -138,6 +143,9 @@ func NewManager(authDir string, db *sql.DB, proxyURL string, refreshInterval int
 		}
 		if opts.RefreshBatchSize > 0 {
 			m.refreshBatchSize = opts.RefreshBatchSize
+		}
+		if opts.Auth401SyncRefreshConcurrency > 0 {
+			m.auth401SyncSem = make(chan struct{}, opts.Auth401SyncRefreshConcurrency)
 		}
 	}
 	m.refreshHTTPPolicy = mergeRefreshHTTPPolicies(opts)
@@ -1740,6 +1748,18 @@ func (m *Manager) recoverAuth401Once(ctx context.Context, acc *Account, qc *Quot
 		out.ReasonCode = ReasonAuth401Disabled
 		out.Detail = "missing refresh_token"
 		return out
+	}
+
+	if m.auth401SyncSem != nil {
+		select {
+		case m.auth401SyncSem <- struct{}{}:
+			defer func() { <-m.auth401SyncSem }()
+		default:
+			out.Status = Auth401RecoverSkippedBusy
+			out.Detail = "sync_oauth_concurrency_full"
+			log.Debugf("账号 [%s] 401 恢复：同步 OAuth 并发已满，换号重试（后台刷新仍会更新 Token）", email)
+			return out
+		}
 	}
 
 	log.Warnf("账号 [%s] 401 恢复：正在同步刷新 Token...", email)

@@ -127,6 +127,10 @@ startup-async-load: true
 # 后台 OAuth 刷新 / 401 恢复等单次请求超时（秒）；不影响 Codex 对话 SSE
 # refresh-single-timeout-sec: 30
 
+# 请求路径上「401→同步 OAuth」的全局并发上限（0=不限制）。高并发易把 OAuth 打 429 时，可设 48~128：
+# 槽满则直接换号、不打刷新接口，WARN「刷新 HTTP 429」会少很多；后台 refresh-interval 仍会修 Token。
+# auth-401-sync-refresh-concurrency: 0
+
 # 额度查询并发数（0 表示使用 refresh-concurrency）
 # quota-check-concurrency: 0
 

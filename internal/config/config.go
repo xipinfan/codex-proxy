@@ -68,6 +68,8 @@ type Config struct {
 	Cooldown429Sec       int `yaml:"cooldown-429-sec"`
 	/* RefreshSingleTimeoutSec 后台 Token 刷新 / 401 恢复等单次 OAuth 请求超时（秒），与对话 SSE 无关 */
 	RefreshSingleTimeoutSec int `yaml:"refresh-single-timeout-sec"`
+	/* Auth401SyncRefreshConcurrency 请求路径 401→同步 OAuth 的全局并发；0 不限制；>0 时槽满直接换号，减轻 OAuth 429 */
+	Auth401SyncRefreshConcurrency int `yaml:"auth-401-sync-refresh-concurrency"`
 	/* RefreshHTTP429Action 刷新 token 遇 HTTP 429：cooldown | remove | disable（默认 cooldown） */
 	RefreshHTTP429Action string `yaml:"refresh-http-429-action"`
 	/* QuotaHTTP429Action 额度 wham/usage 遇 HTTP 429：cooldown | remove | disable（默认 cooldown） */
@@ -279,6 +281,9 @@ func (c *Config) Sanitize() {
 	}
 	if c.RefreshSingleTimeoutSec <= 0 {
 		c.RefreshSingleTimeoutSec = 30
+	}
+	if c.Auth401SyncRefreshConcurrency < 0 {
+		c.Auth401SyncRefreshConcurrency = 0
 	}
 	if c.QuotaCheckConcurrency < 0 {
 		c.QuotaCheckConcurrency = 0
