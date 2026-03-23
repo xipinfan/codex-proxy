@@ -141,6 +141,10 @@ func main() {
 		log.Infof("健康检查: 每 %d 秒, 并发 %d, 连续失败 %d 次禁用",
 			cfg.HealthCheckInterval, cfg.HealthCheckConcurrency, cfg.HealthCheckMaxFailures)
 	}
+	if cfg.DisabledRecoveryIntervalSec > 0 && !cfg.DBEnabled {
+		log.Infof("禁用凭据恢复: 每 %d 秒将 *.json.disabled 还原并探测 OAuth/额度，失败则删文件",
+			cfg.DisabledRecoveryIntervalSec)
+	}
 
 	/* 数据库连接（可选）- 异步初始化以提升启动速度 */
 	var db *sql.DB
@@ -266,6 +270,28 @@ func main() {
 				cfg.BackendResolveAddress,
 			)
 			healthChecker.StartLoop(ctx, manager)
+		}()
+	}
+
+	if cfg.DisabledRecoveryIntervalSec > 0 && !cfg.DBEnabled {
+		go func() {
+			iv := time.Duration(cfg.DisabledRecoveryIntervalSec) * time.Second
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(90 * time.Second):
+			}
+			for {
+				if ctx.Err() != nil {
+					return
+				}
+				manager.RunDisabledCredentialRecovery(ctx, quotaChecker)
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(iv):
+				}
+			}
 		}()
 	}
 

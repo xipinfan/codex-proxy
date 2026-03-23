@@ -97,6 +97,9 @@ health-check-batch-size: 20
 # 定时健康检查单次请求超时（秒）；仅影响后台巡检，不影响对话 API
 health-check-request-timeout: 8
 
+# 仅磁盘 JSON（db-enabled: false）：周期将 *.json.disabled 还原为 .json，OAuth 刷新并同步查额度；不通过则删除凭据（不再改回 .disabled）。0 表示关闭。启动后约 90s 首次执行。
+# disabled-recovery-interval-sec: 3600
+
 # Token 并发刷新数（2w 账号建议 100-200）
 refresh-concurrency: 50
 

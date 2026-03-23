@@ -144,6 +144,8 @@ const (
 	ReasonQuotaHTTP429 = "quota_http_429"
 	/* ReasonQuotaInvalidAfterRefresh OAuth 刷新成功但 wham/usage 返回无效（非 200 且非 429），视为废号 */
 	ReasonQuotaInvalidAfterRefresh = "quota_invalid_after_refresh"
+	/* ReasonRestoreProbeFailed 周期性「禁用凭据恢复」探测中 OAuth/额度不通过，已删除凭据文件 */
+	ReasonRestoreProbeFailed = "restore_probe_failed"
 )
 
 /**

@@ -51,14 +51,16 @@ type Config struct {
 	HealthCheckStartDelay  int    `yaml:"health-check-start-delay"`
 	HealthCheckBatchSize   int    `yaml:"health-check-batch-size"`
 	/* HealthCheckReqTimeout 定时健康检查单次请求超时（秒），与对话转发无关 */
-	HealthCheckReqTimeout    int  `yaml:"health-check-request-timeout"`
-	RefreshConcurrency       int  `yaml:"refresh-concurrency"`
-	MaxConnsPerHost          int  `yaml:"max-conns-per-host"`
-	MaxIdleConns             int  `yaml:"max-idle-conns"`
-	MaxIdleConnsPerHost      int  `yaml:"max-idle-conns-per-host"`
-	EnableHTTP2              bool `yaml:"enable-http2"`
-	StartupAsyncLoad         bool `yaml:"startup-async-load"`
-	StartupLoadRetryInterval int  `yaml:"startup-load-retry-interval"`
+	HealthCheckReqTimeout int `yaml:"health-check-request-timeout"`
+	/* DisabledRecoveryIntervalSec 仅磁盘凭据：周期性将 *.json.disabled 还原为 .json，OAuth+额度探测，失败则删文件；0 关闭 */
+	DisabledRecoveryIntervalSec int  `yaml:"disabled-recovery-interval-sec"`
+	RefreshConcurrency          int  `yaml:"refresh-concurrency"`
+	MaxConnsPerHost             int  `yaml:"max-conns-per-host"`
+	MaxIdleConns                int  `yaml:"max-idle-conns"`
+	MaxIdleConnsPerHost         int  `yaml:"max-idle-conns-per-host"`
+	EnableHTTP2                 bool `yaml:"enable-http2"`
+	StartupAsyncLoad            bool `yaml:"startup-async-load"`
+	StartupLoadRetryInterval    int  `yaml:"startup-load-retry-interval"`
 	/* StartupLoadBatchSize 仅磁盘 JSON + startup-async-load：每批解析并入号池的文件数；0 表示用内置默认（8000） */
 	StartupLoadBatchSize int `yaml:"startup-load-batch-size"`
 	ShutdownTimeout      int `yaml:"shutdown-timeout"`
@@ -110,53 +112,54 @@ func LoadConfig(path string) (*Config, error) {
 	}
 
 	cfg := &Config{
-		Listen:                     ":8080",
-		AuthDir:                    "./auths",
-		DBEnabled:                  false,
-		DBDriver:                   "postgres",
-		DBHost:                     "127.0.0.1",
-		DBPort:                     5432,
-		DBUser:                     "",
-		DBPassword:                 "",
-		DBName:                     "codex_proxy",
-		DBSSLMode:                  "disable",
-		DBDSN:                      "",
-		BackendDomain:              "",
-		BaseURL:                    "",
-		LogLevel:                   "info",
-		RefreshInterval:            3000,
-		MaxRetry:                   2,
-		EnableHealthyRetry:         true,
-		HealthCheckInterval:        300,
-		HealthCheckMaxFailures:     3,
-		HealthCheckConcurrency:     5,
-		HealthCheckStartDelay:      45,
-		HealthCheckBatchSize:       20,
-		HealthCheckReqTimeout:      8,
-		RefreshConcurrency:         50,
-		MaxConnsPerHost:            12, /* 配合 HTTP/2 降低 GOAWAY ENHANCE_YOUR_CALM 概率 */
-		MaxIdleConns:               48,
-		MaxIdleConnsPerHost:        8,
-		EnableHTTP2:                false, /* 默认 HTTP/1.1，多连接复用更稳；需 h2 可显式开启 */
-		StartupAsyncLoad:           true,
-		StartupLoadRetryInterval:   10,
-		ShutdownTimeout:            5,
-		AuthScanInterval:           30,
-		SaveWorkers:                4,
-		Cooldown401Sec:             30,
-		Cooldown429Sec:             60,
-		RefreshSingleTimeoutSec:    30,
-		QuotaCheckConcurrency:      0, /* 0 表示使用 refresh-concurrency */
-		KeepaliveInterval:          60,
-		EmptyRetryMax:              2,
-		Selector:                   "round-robin",
-		RefreshBatchSize:           0,
-		EnableListenH2C:            true,
-		ListenReadHeaderTimeoutSec: 60,
-		ListenIdleTimeoutSec:       180,
-		ListenTCPKeepaliveSec:      30,
-		ListenMaxHeaderBytes:       1 << 20,
-		H2MaxConcurrentStreams:     1000,
+		Listen:                      ":8080",
+		AuthDir:                     "./auths",
+		DBEnabled:                   false,
+		DBDriver:                    "postgres",
+		DBHost:                      "127.0.0.1",
+		DBPort:                      5432,
+		DBUser:                      "",
+		DBPassword:                  "",
+		DBName:                      "codex_proxy",
+		DBSSLMode:                   "disable",
+		DBDSN:                       "",
+		BackendDomain:               "",
+		BaseURL:                     "",
+		LogLevel:                    "info",
+		RefreshInterval:             3000,
+		MaxRetry:                    2,
+		EnableHealthyRetry:          true,
+		HealthCheckInterval:         300,
+		HealthCheckMaxFailures:      3,
+		HealthCheckConcurrency:      5,
+		HealthCheckStartDelay:       45,
+		HealthCheckBatchSize:        20,
+		HealthCheckReqTimeout:       8,
+		DisabledRecoveryIntervalSec: 0,
+		RefreshConcurrency:          50,
+		MaxConnsPerHost:             12, /* 配合 HTTP/2 降低 GOAWAY ENHANCE_YOUR_CALM 概率 */
+		MaxIdleConns:                48,
+		MaxIdleConnsPerHost:         8,
+		EnableHTTP2:                 false, /* 默认 HTTP/1.1，多连接复用更稳；需 h2 可显式开启 */
+		StartupAsyncLoad:            true,
+		StartupLoadRetryInterval:    10,
+		ShutdownTimeout:             5,
+		AuthScanInterval:            30,
+		SaveWorkers:                 4,
+		Cooldown401Sec:              30,
+		Cooldown429Sec:              60,
+		RefreshSingleTimeoutSec:     30,
+		QuotaCheckConcurrency:       0, /* 0 表示使用 refresh-concurrency */
+		KeepaliveInterval:           60,
+		EmptyRetryMax:               2,
+		Selector:                    "round-robin",
+		RefreshBatchSize:            0,
+		EnableListenH2C:             true,
+		ListenReadHeaderTimeoutSec:  60,
+		ListenIdleTimeoutSec:        180,
+		ListenTCPKeepaliveSec:       30,
+		ListenMaxHeaderBytes:        1 << 20,
+		H2MaxConcurrentStreams:      1000,
 	}
 
 	if err = yaml.Unmarshal(data, cfg); err != nil {
@@ -239,6 +242,9 @@ func (c *Config) Sanitize() {
 	}
 	if c.HealthCheckReqTimeout <= 0 {
 		c.HealthCheckReqTimeout = 8
+	}
+	if c.DisabledRecoveryIntervalSec < 0 {
+		c.DisabledRecoveryIntervalSec = 0
 	}
 	if c.RefreshConcurrency <= 0 {
 		c.RefreshConcurrency = 50
