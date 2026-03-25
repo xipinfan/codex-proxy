@@ -29,7 +29,12 @@ type CodexResponsesStream struct {
 	reverseTools map[string]string
 	/* IncludeUsage 为 true 时按 OpenAI stream_options.include_usage 在 [DONE] 前追加 choices 为 [] 的 usage 块 */
 	IncludeUsage bool
-	/* reopenFn 在 Pump 阶段遇可重试上游错误且尚未向客户端发送任何数据时，重新建立上游连接（可换号）。
+	/* pumpRounds Pump 阶段最多执行的读循环轮数（含首轮）；换号重连次数 = pumpRounds-1，与 max-retry 对齐 */
+	pumpRounds int
+	/* reopenExcluded 已在 pump 阶段因上游读失败而排除的凭据路径，避免 reopen 再次选到同一账号 */
+	reopenExcluded map[string]bool
+	/* reopenFn 在 Pump 阶段遇可重试上游读错误且尚未通过 w 向响应体写入任何 SSE 字节时重建上游（可换号）。
+	 * 判定仅看响应体：HTTP 状态行/响应头由 handler 在 SetBodyStreamWriter 之外发送，不计入「已发送」。
 	 * 由 OpenCodexResponsesStream 设置；nil 表示不支持 pump 阶段重试。*/
 	reopenFn func(ctx context.Context) (io.ReadCloser, CodexResponsesMeta, error)
 }
@@ -70,6 +75,15 @@ func (p *prefixThenRestCloser) Close() error {
 	err := p.rest.Close()
 	p.rest = nil
 	return err
+}
+
+// codexStreamPumpRounds 流式 Pump 阶段换号上限：首轮 + (1+maxRetry) 次换号重连，与 sendWithRetry 选号次数同量级。
+func codexStreamPumpRounds(maxRetry int) int {
+	n := 2 + maxRetry
+	if n < 2 {
+		return 2
+	}
+	return n
 }
 
 // openCodexResponsesBody 与 OpenCodexResponsesStream 相同：选号、sendWithRetry、首读探测空体/可重试读错并换号。
@@ -151,23 +165,27 @@ func (e *Executor) OpenCodexResponsesStream(ctx context.Context, rc RetryConfig,
 		return nil, err
 	}
 	includeUsage := gjson.GetBytes(requestBody, "stream_options.include_usage").Bool()
-	return &CodexResponsesStream{
-		body:         bodyRC,
-		account:      meta.Account,
-		Attempts:     meta.Attempts,
-		BaseModel:    meta.BaseModel,
-		ConvertDur:   meta.ConvertDur,
-		SendDur:      meta.SendDur,
-		reverseTools: meta.ReverseTools,
-		IncludeUsage: includeUsage,
-		reopenFn: func(ctx context.Context) (io.ReadCloser, CodexResponsesMeta, error) {
-			return e.openCodexResponsesBody(ctx, rc, requestBody, model)
-		},
-	}, nil
+	s := &CodexResponsesStream{
+		body:           bodyRC,
+		account:        meta.Account,
+		Attempts:       meta.Attempts,
+		BaseModel:      meta.BaseModel,
+		ConvertDur:     meta.ConvertDur,
+		SendDur:        meta.SendDur,
+		reverseTools:   meta.ReverseTools,
+		IncludeUsage:   includeUsage,
+		pumpRounds:     codexStreamPumpRounds(rc.MaxRetry),
+		reopenExcluded: make(map[string]bool),
+	}
+	s.reopenFn = func(ctx context.Context) (io.ReadCloser, CodexResponsesMeta, error) {
+		rcEx := MergeRetryConfigExcluded(rc, s.reopenExcluded)
+		return e.openCodexResponsesBody(ctx, rcEx, requestBody, model)
+	}
+	return s, nil
 }
 
-// PumpChatCompletion 将 Codex SSE 转为 OpenAI Chat Completions 块写入 w（客户端 SSE 头须已由 handler 写好）。
-// 若 pump 阶段遇可重试上游错误且尚未向客户端发送任何 chunk，自动换号重建连接重试一次。
+// PumpChatCompletion 将 Codex SSE 转为 OpenAI Chat Completions 块写入 w（仅响应体；HTTP 响应头由 handler 事先设好）。
+// 若 pump 遇可重试上游读错误且尚未向响应体写入任何 SSE 消息（chunkCount==0，不含响应头），则换号重连，次数与 max-retry 对齐。
 func (s *CodexResponsesStream) PumpChatCompletion(w io.Writer, flush func()) error {
 	defer func() { _ = s.body.Close() }()
 
@@ -180,11 +198,14 @@ func (s *CodexResponsesStream) PumpChatCompletion(w io.Writer, flush func()) err
 	var state *translator.StreamState
 	var scanErr error
 
-	for round := 0; round < 2; round++ {
-		if round == 1 {
-			// 遇可重试上游错误且尚未向客户端发送任何 chunk 时换号重试
+	for round := 0; round < s.pumpRounds; round++ {
+		if round > 0 {
+			// 仅当响应体侧尚未写出任何 SSE chunk（HTTP 响应头不算）时可换号
 			if !isRetryableUpstreamReadErr(scanErr) || chunkCount > 0 || s.reopenFn == nil {
 				break
+			}
+			if fp := s.account.FilePath; fp != "" {
+				s.reopenExcluded[fp] = true
 			}
 			_ = s.body.Close()
 			newBody, newMeta, rerr := s.reopenFn(pumpCtx)
@@ -336,20 +357,23 @@ func (s *CodexResponsesStream) PumpChatCompletion(w io.Writer, flush func()) err
 	return nil
 }
 
-// PumpRawSSE 原样转发上游 SSE 字节（Responses API）。
-// 若 pump 阶段遇可重试上游错误且尚未向客户端写入任何字节，自动换号重建连接重试一次。
+// PumpRawSSE 原样转发上游 SSE 字节（Responses API，仅写 w 即响应体）。
+// 若遇可重试上游读错误且响应体侧尚未写入任何字节（sseBodyBytes==0；已发的 HTTP 响应头不计入），则换号重连，次数与 max-retry 对齐。
 func (s *CodexResponsesStream) PumpRawSSE(w io.Writer, flush func()) error {
 	defer func() { _ = s.body.Close() }()
 	buf := make([]byte, httpBufferSize)
 	streamStart := time.Now()
-	bytesWritten := 0
+	// 仅统计经 w 写入的 SSE 响应体字节；与 fasthttp SetBodyStreamWriter 一致，状态行/响应头不在此 Writer 上。
+	sseBodyBytes := 0
 	var pumpErr error
 
-	for round := 0; round < 2; round++ {
-		if round == 1 {
-			// 遇可重试上游错误且尚未向客户端写入任何字节时换号重试
-			if !isRetryableUpstreamReadErr(pumpErr) || bytesWritten > 0 || s.reopenFn == nil {
+	for round := 0; round < s.pumpRounds; round++ {
+		if round > 0 {
+			if !isRetryableUpstreamReadErr(pumpErr) || sseBodyBytes > 0 || s.reopenFn == nil {
 				break
+			}
+			if fp := s.account.FilePath; fp != "" {
+				s.reopenExcluded[fp] = true
 			}
 			_ = s.body.Close()
 			newBody, newMeta, rerr := s.reopenFn(context.Background())
@@ -371,7 +395,7 @@ func (s *CodexResponsesStream) PumpRawSSE(w io.Writer, flush func()) error {
 				if _, werr := w.Write(buf[:n]); werr != nil {
 					return werr
 				}
-				bytesWritten += n
+				sseBodyBytes += n
 				if flush != nil {
 					flush()
 				}
@@ -395,6 +419,63 @@ func (s *CodexResponsesStream) PumpRawSSE(w io.Writer, flush func()) error {
 	log.Errorf("读取流式响应失败: %v", pumpErr)
 	log.Infof("req summary responses-stream model=%s account=%s attempts=%d convert=%v upstream=%v total=%v (ERR)", s.BaseModel, s.account.GetEmail(), s.Attempts, s.ConvertDur, s.SendDur, time.Since(streamStart))
 	return wrapReadErr(pumpErr)
+}
+
+// countingWriter 统计写入 w 的字节数（用于判断是否已向客户端承诺 SSE 体）
+type countingWriter struct {
+	w io.Writer
+	n *int64
+}
+
+func (c *countingWriter) Write(p []byte) (int, error) {
+	nw, err := c.w.Write(p)
+	if nw > 0 {
+		*c.n += int64(nw)
+	}
+	return nw, err
+}
+
+type CodexStreamPump func(s *CodexResponsesStream, w io.Writer, flush func()) error
+
+func CodexStreamOpenBridgeMax(maxRetry int) int {
+	n := 2 + maxRetry
+	if n < 2 {
+		return 2
+	}
+	return n
+}
+func (e *Executor) RunCodexStreamWithOpenBridges(octx context.Context, rc RetryConfig, requestBody []byte, model string, w io.Writer, flush func(), bridges int, pump CodexStreamPump) error {
+	var written int64
+	cw := &countingWriter{w: w, n: &written}
+	var lastErr error
+	for b := 0; b < bridges; b++ {
+		ctx := octx
+		if b > 0 {
+			ctx = context.Background()
+		}
+		s, err := e.OpenCodexResponsesStream(ctx, rc, requestBody, model)
+		if err != nil {
+			lastErr = err
+			if written == 0 && b < bridges-1 && IsRetryableOpenCodexError(err) {
+				log.Warnf("codex stream 全量重连 open %d/%d: %v", b+1, bridges, err)
+				continue
+			}
+			return err
+		}
+		err = pump(s, cw, flush)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if written > 0 || !IsRetryableStreamPumpError(err) {
+			return err
+		}
+		if b >= bridges-1 {
+			return err
+		}
+		log.Warnf("codex stream 全量重连 pump %d/%d（响应体尚无字节）: %v", b+1, bridges, err)
+	}
+	return lastErr
 }
 
 // CodexCompactStream /responses/compact 成功后的响应（含待透传头与 Body）。
