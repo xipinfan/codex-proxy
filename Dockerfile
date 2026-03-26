@@ -5,10 +5,13 @@ RUN apk add --no-cache git ca-certificates
 
 WORKDIR /src
 COPY go.mod go.sum ./
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod \
+    go mod download
 COPY . .
 
-RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /codex-proxy .
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 go build -ldflags="-s -w" -o /codex-proxy .
 
 # 阶段二：运行
 FROM alpine:3.21
