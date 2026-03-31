@@ -108,6 +108,9 @@ type Account struct {
 	/* access_token 过期时刻（UnixMilli），0 表示未知；选号时用于排除即将过期的账号 */
 	accessExpireUnixMs atomic.Int64
 
+	/* RecordSuccess 时写入，供 PickRecentlySuccessful O(N) 取最近成功号，无需全表排序 */
+	lastSuccessUnixMs atomic.Int64
+
 	/* 上游 429 后的额度恢复流程，防止同一账号堆积多个恢复 goroutine */
 	upstream429Recovering atomic.Int32
 }
@@ -452,6 +455,7 @@ func (a *Account) RecordSuccess() {
 	a.ConsecutiveFailures = 0
 	a.LastUsedAt = time.Now()
 	a.mu.Unlock()
+	a.lastSuccessUnixMs.Store(time.Now().UnixMilli())
 }
 
 /**

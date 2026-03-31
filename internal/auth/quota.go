@@ -29,9 +29,11 @@ import (
  * @field proxyURL - 代理地址
  */
 type QuotaChecker struct {
-	httpClient  *http.Client
-	concurrency int
-	usageURL    string
+	httpClient        *http.Client
+	concurrency       int
+	usageURL          string
+	resultCacheTTL    time.Duration /* 0=不在 CheckAccountResult 内复用本地缓存 */
+	transientCacheMax time.Duration /* 429/5xx 等短 TTL 上限 */
 }
 
 /**
@@ -54,9 +56,10 @@ type QuotaCheckResult struct {
  * NewQuotaChecker 创建新的额度查询器
  * @param proxyURL - 代理地址
  * @param concurrency - 并发查询数
+ * @param resultCacheTTL CheckAccountResult 内复用账号上已缓存的 wham 结果的最长时间；0 表示每次预检都发起 HTTP
  * @returns *QuotaChecker - 额度查询器实例
  */
-func NewQuotaChecker(baseURL, proxyURL string, concurrency int, enableHTTP2 bool, backendDomain, resolveAddress string) *QuotaChecker {
+func NewQuotaChecker(baseURL, proxyURL string, concurrency int, enableHTTP2 bool, backendDomain, resolveAddress string, resultCacheTTL time.Duration) *QuotaChecker {
 	if concurrency <= 0 {
 		concurrency = 50
 	}
@@ -86,13 +89,19 @@ func NewQuotaChecker(baseURL, proxyURL string, concurrency int, enableHTTP2 bool
 		DisableCompression:    true,
 	})
 
+	transientMax := 5 * time.Second
+	if resultCacheTTL > 0 && resultCacheTTL < transientMax {
+		transientMax = resultCacheTTL
+	}
 	return &QuotaChecker{
 		httpClient: &http.Client{
 			Transport: transport,
 			Timeout:   20 * time.Second,
 		},
-		concurrency: concurrency,
-		usageURL:    strings.TrimSpace(usageURL),
+		concurrency:       concurrency,
+		usageURL:          strings.TrimSpace(usageURL),
+		resultCacheTTL:    resultCacheTTL,
+		transientCacheMax: transientMax,
 	}
 }
 
@@ -202,8 +211,56 @@ func (qc *QuotaChecker) CheckOne(ctx context.Context, acc *Account) {
  * CheckAccountResult 查询额度并返回结果码：1=有效，-1=无效 4xx，0=失败/5xx 暂态，2=HTTP 429
  */
 func (qc *QuotaChecker) CheckAccountResult(ctx context.Context, acc *Account) int {
+	if qc.resultCacheTTL > 0 {
+		if v, ok := qc.tryCachedQuotaVerdict(acc); ok {
+			return v
+		}
+	}
 	v, _ := qc.checkAccount(ctx, acc)
 	return v
+}
+
+/* tryCachedQuotaVerdict 基于账号上最近一次 checkAccount 写入的 QuotaInfo 短时复用 verdict，减少 wham 往返 */
+func (qc *QuotaChecker) tryCachedQuotaVerdict(acc *Account) (int, bool) {
+	if acc == nil {
+		return 0, false
+	}
+	acc.mu.RLock()
+	qi := acc.QuotaInfo
+	checked := acc.QuotaCheckedAt
+	acc.mu.RUnlock()
+	if qi == nil || checked.IsZero() {
+		return 0, false
+	}
+	age := time.Since(checked)
+	st := qi.StatusCode
+	switch {
+	case st == 200:
+		if age >= qc.resultCacheTTL {
+			return 0, false
+		}
+		if qi.Valid {
+			return 1, true
+		}
+		return -1, true
+	case st == 429:
+		if age >= qc.transientCacheMax {
+			return 0, false
+		}
+		return 2, true
+	case st >= 500:
+		if age >= qc.transientCacheMax {
+			return 0, false
+		}
+		return 0, true
+	case st >= 400:
+		if age >= qc.resultCacheTTL {
+			return 0, false
+		}
+		return -1, true
+	default:
+		return 0, false
+	}
 }
 
 /**

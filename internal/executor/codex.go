@@ -60,6 +60,12 @@ type HTTPPoolConfig struct {
 	BackendDomain        string
 	ResolveAddress       string
 	KeepaliveIntervalSec int /* 连接保活间隔（秒），0 使用默认 60 */
+	/* IdleConnTimeoutSec 空闲连接保持时间（秒），0 默认 120，利于高并发复用、减少 TLS 握手 */
+	IdleConnTimeoutSec int
+	/* TLSHandshakeTimeoutSec TLS 握手超时（秒），0 表示不限制（由 net/http 默认） */
+	TLSHandshakeTimeoutSec int
+	/* HTTP2MaxConnsPerHostCap 覆盖 h2 下单主机连接数上限，0 使用 netutil 内置默认 */
+	HTTP2MaxConnsPerHostCap int
 }
 
 /**
@@ -103,16 +109,28 @@ func NewExecutor(baseURL, proxyURL string, poolCfg HTTPPoolConfig) *Executor {
 	}
 	dialCtx := netutil.BuildUpstreamDialContext(dialer, proxyURL, poolCfg.BackendDomain, poolCfg.ResolveAddress)
 
+	idleSec := poolCfg.IdleConnTimeoutSec
+	if idleSec <= 0 {
+		idleSec = 120
+	}
+	var tlsHandshake time.Duration
+	if poolCfg.TLSHandshakeTimeoutSec > 0 {
+		tlsHandshake = time.Duration(poolCfg.TLSHandshakeTimeoutSec) * time.Second
+	}
+
 	transport := netutil.NewUpstreamTransport(netutil.UpstreamTransportConfig{
-		DialContext:         dialCtx,
-		ProxyURL:            proxyURL,
-		MaxIdleConns:        maxIdleConns,
-		MaxIdleConnsPerHost: maxIdleConnsPerHost,
-		MaxConnsPerHost:     maxConnsPerHost,
-		EnableHTTP2:         enableHTTP2,
-		WriteBufferSize:     httpBufferSize,
-		ReadBufferSize:      httpBufferSize,
-		DisableCompression:  true,
+		DialContext:             dialCtx,
+		ProxyURL:                proxyURL,
+		MaxIdleConns:            maxIdleConns,
+		MaxIdleConnsPerHost:     maxIdleConnsPerHost,
+		MaxConnsPerHost:         maxConnsPerHost,
+		HTTP2MaxConnsPerHostCap: poolCfg.HTTP2MaxConnsPerHostCap,
+		EnableHTTP2:             enableHTTP2,
+		IdleConnTimeout:         time.Duration(idleSec) * time.Second,
+		TLSHandshakeTimeout:     tlsHandshake,
+		WriteBufferSize:         httpBufferSize,
+		ReadBufferSize:          httpBufferSize,
+		DisableCompression:      true,
 	})
 	if proxyURL != "" {
 		if proxyScheme, err := netutil.ParseProxyScheme(proxyURL); err == nil {

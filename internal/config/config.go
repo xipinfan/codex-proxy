@@ -91,8 +91,14 @@ type Config struct {
 	RefreshHTTPStatusPolicy map[string]map[string]string `yaml:"refresh-http-status-policy"`
 	QuotaHTTPStatusPolicy   map[string]map[string]string `yaml:"quota-http-status-policy"`
 	QuotaCheckConcurrency   int                          `yaml:"quota-check-concurrency"`
-	KeepaliveInterval       int                          `yaml:"keepalive-interval"`
-	/* EmptyRetryMax 非流式空结果时的换号次数；亦用于 responses 在读到 GOAWAY/断连等时的读阶段换号重试（至少 2 轮） */
+	QuotaCheckCacheTTLSec int `yaml:"quota-check-cache-ttl-sec"`
+	/* UpstreamIdleConnTimeoutSec 出站 Codex 连接池空闲超时（秒），0 表示使用内置默认 120 */
+	UpstreamIdleConnTimeoutSec int `yaml:"upstream-idle-conn-timeout-sec"`
+	/* UpstreamTLSHandshakeTimeoutSec 出站 TLS 握手超时（秒），0 不额外限制 */
+	UpstreamTLSHandshakeTimeoutSec int `yaml:"upstream-tls-handshake-timeout-sec"`
+	/* HTTP2MaxConnsPerHostCap 开启 enable-http2 时单主机 TCP 连接上限，0 使用内置 30 */
+	HTTP2MaxConnsPerHostCap int `yaml:"http2-max-conns-per-host-cap"`
+	KeepaliveInterval       int `yaml:"keepalive-interval"`
 	EmptyRetryMax    int      `yaml:"empty-retry-max"`
 	Selector         string   `yaml:"selector"`
 	RefreshBatchSize int      `yaml:"refresh-batch-size"`
@@ -121,54 +127,58 @@ func LoadConfig(path string) (*Config, error) {
 	}
 
 	cfg := &Config{
-		Listen:                      ":8080",
-		AuthDir:                     "./auths",
-		DBEnabled:                   false,
-		DBDriver:                    "postgres",
-		DBHost:                      "127.0.0.1",
-		DBPort:                      5432,
-		DBUser:                      "",
-		DBPassword:                  "",
-		DBName:                      "codex_proxy",
-		DBSSLMode:                   "disable",
-		DBDSN:                       "",
-		BackendDomain:               "",
-		BaseURL:                     "",
-		LogLevel:                    "info",
-		RefreshInterval:             3000,
-		MaxRetry:                    2,
-		EnableHealthyRetry:          true,
-		HealthCheckInterval:         300,
-		HealthCheckMaxFailures:      3,
-		HealthCheckConcurrency:      5,
-		HealthCheckStartDelay:       45,
-		HealthCheckBatchSize:        20,
-		HealthCheckReqTimeout:       8,
-		DisabledRecoveryIntervalSec: DefaultDisabledRecoveryIntervalSec,
-		RefreshConcurrency:          50,
-		MaxConnsPerHost:             12, /* 配合 HTTP/2 降低 GOAWAY ENHANCE_YOUR_CALM 概率 */
-		MaxIdleConns:                48,
-		MaxIdleConnsPerHost:         8,
-		EnableHTTP2:                 false, /* 默认 HTTP/1.1，多连接复用更稳；需 h2 可显式开启 */
-		StartupAsyncLoad:            true,
-		StartupLoadRetryInterval:    10,
-		ShutdownTimeout:             5,
-		AuthScanInterval:            30,
-		SaveWorkers:                 4,
-		Cooldown401Sec:              30,
-		Cooldown429Sec:              60,
-		RefreshSingleTimeoutSec:     30,
-		QuotaCheckConcurrency:       0, /* 0 表示使用 refresh-concurrency */
-		KeepaliveInterval:           60,
-		EmptyRetryMax:               2,
-		Selector:                    "round-robin",
-		RefreshBatchSize:            0,
-		EnableListenH2C:             true,
-		ListenReadHeaderTimeoutSec:  60,
-		ListenIdleTimeoutSec:        180,
-		ListenTCPKeepaliveSec:       30,
-		ListenMaxHeaderBytes:        1 << 20,
-		H2MaxConcurrentStreams:      1000,
+		Listen:                         ":8080",
+		AuthDir:                        "./auths",
+		DBEnabled:                      false,
+		DBDriver:                       "postgres",
+		DBHost:                         "127.0.0.1",
+		DBPort:                         5432,
+		DBUser:                         "",
+		DBPassword:                     "",
+		DBName:                         "codex_proxy",
+		DBSSLMode:                      "disable",
+		DBDSN:                          "",
+		BackendDomain:                  "",
+		BaseURL:                        "",
+		LogLevel:                       "info",
+		RefreshInterval:                3000,
+		MaxRetry:                       2,
+		EnableHealthyRetry:             true,
+		HealthCheckInterval:            300,
+		HealthCheckMaxFailures:         3,
+		HealthCheckConcurrency:         5,
+		HealthCheckStartDelay:          45,
+		HealthCheckBatchSize:           20,
+		HealthCheckReqTimeout:          8,
+		DisabledRecoveryIntervalSec:    DefaultDisabledRecoveryIntervalSec,
+		RefreshConcurrency:             50,
+		MaxConnsPerHost:                12, /* 配合 HTTP/2 降低 GOAWAY ENHANCE_YOUR_CALM 概率 */
+		MaxIdleConns:                   48,
+		MaxIdleConnsPerHost:            8,
+		EnableHTTP2:                    false, /* 默认 HTTP/1.1，多连接复用更稳；需 h2 可显式开启 */
+		StartupAsyncLoad:               true,
+		StartupLoadRetryInterval:       10,
+		ShutdownTimeout:                5,
+		AuthScanInterval:               30,
+		SaveWorkers:                    4,
+		Cooldown401Sec:                 30,
+		Cooldown429Sec:                 60,
+		RefreshSingleTimeoutSec:        30,
+		QuotaCheckConcurrency:          0, /* 0 表示使用 refresh-concurrency */
+		QuotaCheckCacheTTLSec:          30,
+		UpstreamIdleConnTimeoutSec:     0,
+		UpstreamTLSHandshakeTimeoutSec: 0,
+		HTTP2MaxConnsPerHostCap:        0,
+		KeepaliveInterval:              60,
+		EmptyRetryMax:                  2,
+		Selector:                       "round-robin",
+		RefreshBatchSize:               0,
+		EnableListenH2C:                true,
+		ListenReadHeaderTimeoutSec:     60,
+		ListenIdleTimeoutSec:           180,
+		ListenTCPKeepaliveSec:          30,
+		ListenMaxHeaderBytes:           1 << 20,
+		H2MaxConcurrentStreams:         1000,
 	}
 
 	if err = yaml.Unmarshal(data, cfg); err != nil {
@@ -303,6 +313,30 @@ func (c *Config) Sanitize() {
 	}
 	if c.MaxIdleConnsPerHost < 0 {
 		c.MaxIdleConnsPerHost = 0
+	}
+	if c.QuotaCheckCacheTTLSec < 0 {
+		c.QuotaCheckCacheTTLSec = 0
+	}
+	if c.QuotaCheckCacheTTLSec > 86400 {
+		c.QuotaCheckCacheTTLSec = 86400
+	}
+	if c.UpstreamIdleConnTimeoutSec < 0 {
+		c.UpstreamIdleConnTimeoutSec = 0
+	}
+	if c.UpstreamIdleConnTimeoutSec > 7200 {
+		c.UpstreamIdleConnTimeoutSec = 7200
+	}
+	if c.UpstreamTLSHandshakeTimeoutSec < 0 {
+		c.UpstreamTLSHandshakeTimeoutSec = 0
+	}
+	if c.UpstreamTLSHandshakeTimeoutSec > 300 {
+		c.UpstreamTLSHandshakeTimeoutSec = 300
+	}
+	if c.HTTP2MaxConnsPerHostCap < 0 {
+		c.HTTP2MaxConnsPerHostCap = 0
+	}
+	if c.HTTP2MaxConnsPerHostCap > 512 {
+		c.HTTP2MaxConnsPerHostCap = 512
 	}
 	if c.StartupLoadRetryInterval <= 0 {
 		c.StartupLoadRetryInterval = 10

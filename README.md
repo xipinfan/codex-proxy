@@ -155,10 +155,19 @@ curl http://localhost:8080/v1/messages \
 
 ## 思考配置
 
-在模型名中使用连字符后缀控制思考级别；可选 `-fast` 后缀启用快速模式（如 `gpt-5.4-codex-high-fast`）。  
-**无后缀模型**（如 `gpt-5`、`gpt-5-codex`）且**客户端未传**思考相关参数（如 `reasoning.effort` / `reasoning_effort`）时，默认**不向请求体写入** `reasoning.effort`，由上游按不传递或 auto 处理。
+在模型名中使用连字符后缀控制思考级别；还可选下列**子参数**（可与思考后缀任意顺序拼接，解析时先去掉 `-fast` 再去掉 `-1m`，最后解析思考后缀）：
 
-下表列出各基础模型可用的思考等级与变体，**每个基础模型均可加 `-fast`**（如 `gpt-5-codex-fast`、`gpt-5.1-codex-low-fast`）。
+- **`-fast`**：上游 `service_tier` 固定为 `fast`（快速队列）。
+- **`-1m`**：上游固定写入大上下文相关字段：`model_context_window = 1047576`，`model_auto_compact_token_limit = 105197`。
+
+**子参数与请求体的关系**：只要在模型名里写了对应子参数，代理会**强制覆盖**上游请求中的同名字段，**不会**再采用客户端在 JSON 里传的值。未写该子参数时，这些字段若客户端有传则**透传**。
+
+- 思考级别写在模型名后缀（如 `gpt-5.4-high`）时，同样**覆盖**请求体里的 `reasoning_effort` / `variant` / `reasoning.effort`（以模型名为准）。
+- **无思考后缀**的基础模型（如 `gpt-5`、`gpt-5-codex`）且**客户端未传**思考相关参数时，默认**不向请求体写入** `reasoning.effort`，由上游按不传递或 auto 处理。
+
+示例：`gpt-5.4-codex-high-fast`、`gpt-5.4-1m-fast`、`gpt-5.4-high-1m-fast`、`gpt-5.4-xhigh-1m-fast`（`-1m` 与 `-fast` 相邻顺序可互换，解析结果一致）。
+
+下表列出各基础模型可用的思考等级；**每个「基础模型」或「基础模型 + 思考等级」行**均可再叠加 `-fast`、`-1m` 及二者组合（与 `/v1/models` 枚举一致）。
 
 | 基础模型 | 支持的思考等级 | 示例 model id |
 |----------|----------------|----------------|
@@ -172,10 +181,10 @@ curl http://localhost:8080/v1/messages \
 | `gpt-5.2` | low, medium, high, xhigh, none, auto | `gpt-5.2`、`gpt-5.2-xhigh-fast`、`gpt-5.2-none` |
 | `gpt-5.2-codex` | low, medium, high, xhigh, auto | `gpt-5.2-codex`、`gpt-5.2-codex-xhigh-fast` |
 | `gpt-5.3-codex` | low, medium, high, xhigh, none, auto | `gpt-5.3-codex`、`gpt-5.3-codex-none-fast` |
-| `gpt-5.4` | low, medium, high, xhigh, none, auto | `gpt-5.4`、`gpt-5.4-xhigh-fast`、`gpt-5.4-auto` |
+| `gpt-5.4` | low, medium, high, xhigh, none, auto | `gpt-5.4`、`gpt-5.4-xhigh-fast`、`gpt-5.4-xhigh-1m-fast`、`gpt-5.4-auto` |
 | `gpt-5.4-mini` | low, medium, high, xhigh, none, auto | `gpt-5.4-mini`、`gpt-5.4-mini-none-fast` |
 
-以上每个 model id 均可再加 `-fast` 得到快速队列变体（如 `gpt-5.4-mini-high-fast`）。
+大上下文示例：`gpt-5.4-1m`、`gpt-5.4-high-1m-fast`、`gpt-5.4-xhigh-1m-fast`。
 
 ## API 接口
 

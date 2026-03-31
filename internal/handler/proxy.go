@@ -91,11 +91,12 @@ type auth401RecoverTrack struct {
  * @param apiKeys - API Key 列表
  * @param maxRetry - 最大重试次数（0 表示不重试）
  * @param quotaCheckConcurrency - 额度查询并发数（来自 config；quotaChecker 为 nil 新建 checker 时用）
+ * @param quotaCheckCacheTTLSec - wham 预检本地复用秒数（quotaChecker 为 nil 时传给 NewQuotaChecker；0 关闭）
  * @param quotaChecker - 与 main 注入 Manager 的同一实例（wham/usage）；nil 时内部新建
  * @param debugUpstreamStream - 是否 Info 打印上游 Codex SSE 原文（对应配置 debug-upstream-stream）
  * @returns *ProxyHandler - 代理处理器实例
  */
-func NewProxyHandler(manager *auth.Manager, exec *executor.Executor, apiKeys []string, maxRetry int, enableHealthyRetry bool, proxyURL string, baseURL string, enableHTTP2 bool, backendDomain string, backendResolveAddress string, quotaCheckConcurrency int, quotaChecker *auth.QuotaChecker, emptyRetryMax int, debugUpstreamStream bool, indexHTML []byte) *ProxyHandler {
+func NewProxyHandler(manager *auth.Manager, exec *executor.Executor, apiKeys []string, maxRetry int, enableHealthyRetry bool, proxyURL string, baseURL string, enableHTTP2 bool, backendDomain string, backendResolveAddress string, quotaCheckConcurrency int, quotaCheckCacheTTLSec int, quotaChecker *auth.QuotaChecker, emptyRetryMax int, debugUpstreamStream bool, indexHTML []byte) *ProxyHandler {
 	if maxRetry < 0 {
 		maxRetry = 0
 	}
@@ -103,7 +104,7 @@ func NewProxyHandler(manager *auth.Manager, exec *executor.Executor, apiKeys []s
 		quotaCheckConcurrency = 50
 	}
 	if quotaChecker == nil {
-		quotaChecker = auth.NewQuotaChecker(baseURL, proxyURL, quotaCheckConcurrency, enableHTTP2, backendDomain, backendResolveAddress)
+		quotaChecker = auth.NewQuotaChecker(baseURL, proxyURL, quotaCheckConcurrency, enableHTTP2, backendDomain, backendResolveAddress, time.Duration(quotaCheckCacheTTLSec)*time.Second)
 	}
 	return &ProxyHandler{
 		manager:             manager,
@@ -269,18 +270,28 @@ var modelList = []modelListEntry{
 	{base: "gpt-5.4-mini", suffixes: []string{"low", "medium", "high", "xhigh", "none", "auto"}},
 }
 
-/**
- * handleModels 模型列表接口
- * 按 README 表格生成：每个基础模型 + 其支持的思考等级 + 均可加 -fast
- */
+func expandModelSubvariantIDs(id string) []string {
+	return []string{
+		id,
+		id + "-1m",
+		id + "-fast",
+		id + "-1m-fast",
+		id + "-fast-1m",
+	}
+}
+
 func (h *ProxyHandler) handleModels(ctx *fasthttp.RequestCtx) {
-	models := make([]map[string]interface{}, 0, 50*20)
+	models := make([]map[string]interface{}, 0, 800)
 	for _, e := range modelList {
-		models = append(models, map[string]interface{}{"id": e.base, "object": "model", "owned_by": "openai"})
-		models = append(models, map[string]interface{}{"id": e.base + "-fast", "object": "model", "owned_by": "openai"})
+		ids := make([]string, 0, 1+len(e.suffixes))
+		ids = append(ids, e.base)
 		for _, s := range e.suffixes {
-			models = append(models, map[string]interface{}{"id": e.base + "-" + s, "object": "model", "owned_by": "openai"})
-			models = append(models, map[string]interface{}{"id": e.base + "-" + s + "-fast", "object": "model", "owned_by": "openai"})
+			ids = append(ids, e.base+"-"+s)
+		}
+		for _, id := range ids {
+			for _, mid := range expandModelSubvariantIDs(id) {
+				models = append(models, map[string]interface{}{"id": mid, "object": "model", "owned_by": "openai"})
+			}
 		}
 	}
 
@@ -319,11 +330,14 @@ func (h *ProxyHandler) buildRetryConfig() executor.RetryConfig {
 		On429RecoveryFn: func(ctx context.Context, acc *auth.Account) {
 			h.manager.ScheduleUpstream429Recovery(ctx, acc, h.quotaChecker)
 		},
-		OnAfterUpstreamErrFn: func(acc *auth.Account, statusCode int) {
+		OnAfterUpstreamErrFn: func(_ *auth.Account, statusCode int) {
 			if statusCode >= 200 && statusCode < 300 {
 				return
 			}
-			h.manager.InvalidateSelectorCache()
+			/* 仅当 handleAccountError 会写入冷却等原子状态时失效缓存；401/5xx 等不改可用性，避免错误风暴下惊群 filterAvailable */
+			if statusCode == 429 || statusCode == 403 {
+				h.manager.InvalidateSelectorCache()
+			}
 		},
 		QuotaCheckFn: func(ctx context.Context, acc *auth.Account) bool {
 			if h.quotaChecker == nil {

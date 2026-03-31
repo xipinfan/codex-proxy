@@ -41,14 +41,11 @@ func ConvertOpenAIRequestToCodex(modelName string, rawJSON []byte, stream bool) 
 	 * Responses API 格式:   "reasoning": {"effort": "high"}
 	 * 优先使用请求体中已有的值，不再强制设为 medium
 	 */
-	if v := gjson.GetBytes(rawJSON, "reasoning_effort"); v.Exists() {
-		/* Chat Completions 格式 → 转为 Codex 嵌套格式 */
+	if v := gjson.GetBytes(rawJSON, "reasoning.effort"); v.Exists() {
 		out, _ = sjson.Set(out, "reasoning.effort", v.Value())
-	} else if v := gjson.GetBytes(rawJSON, "reasoning.effort"); v.Exists() {
-		/* Responses API 格式 → 直接透传 */
+	} else if v := gjson.GetBytes(rawJSON, "reasoning_effort"); v.Exists() {
 		out, _ = sjson.Set(out, "reasoning.effort", v.Value())
 	} else if v := gjson.GetBytes(rawJSON, "variant"); v.Exists() {
-		/* OpenWork 等客户端使用 variant 代替 reasoning_effort（issue #258） */
 		out, _ = sjson.Set(out, "reasoning.effort", v.Value())
 	}
 	out, _ = sjson.Set(out, "parallel_tool_calls", true)
@@ -66,14 +63,8 @@ func ConvertOpenAIRequestToCodex(modelName string, rawJSON []byte, stream bool) 
 	 */
 	existingInput := gjson.GetBytes(rawJSON, "input")
 	if existingInput.Exists() {
-		/*
-		 * Responses API 快速路径：直接在原始 JSON 上原地修改
-		 * 不重建 JSON，大幅减少序列化开销和内存分配
-		 */
 		result := make([]byte, len(rawJSON))
 		copy(result, rawJSON)
-
-		/* input 为字符串时，转为标准消息数组格式 */
 		if existingInput.Type == gjson.String {
 			inputArr, _ := sjson.Set(
 				`[{"type":"message","role":"user","content":[{"type":"input_text","text":""}]}]`,
@@ -88,20 +79,18 @@ func ConvertOpenAIRequestToCodex(modelName string, rawJSON []byte, stream bool) 
 		result, _ = sjson.SetBytes(result, "parallel_tool_calls", true)
 		result, _ = sjson.SetBytes(result, "include", []string{"reasoning.encrypted_content"})
 
-		if v := gjson.GetBytes(rawJSON, "reasoning_effort"); v.Exists() {
+		if v := gjson.GetBytes(rawJSON, "reasoning.effort"); v.Exists() {
+			result, _ = sjson.SetBytes(result, "reasoning.effort", v.Value())
+			result, _ = sjson.DeleteBytes(result, "reasoning_effort")
+		} else if v := gjson.GetBytes(rawJSON, "reasoning_effort"); v.Exists() {
 			result, _ = sjson.SetBytes(result, "reasoning.effort", v.Value())
 			result, _ = sjson.DeleteBytes(result, "reasoning_effort")
 		} else if v := gjson.GetBytes(rawJSON, "variant"); v.Exists() {
-			/* OpenWork 等客户端使用 variant 代替 reasoning_effort（issue #258） */
 			result, _ = sjson.SetBytes(result, "reasoning.effort", v.Value())
 		}
-
-		/* 确保 instructions 存在 */
 		if !gjson.GetBytes(result, "instructions").Exists() {
 			result, _ = sjson.SetBytes(result, "instructions", "")
 		}
-
-		/* 删除上游不支持的参数 */
 		result, _ = sjson.DeleteBytes(result, "previous_response_id")
 		result, _ = sjson.DeleteBytes(result, "stream_options")
 		result, _ = sjson.DeleteBytes(result, "prompt_cache_retention")
@@ -115,22 +104,12 @@ func ConvertOpenAIRequestToCodex(modelName string, rawJSON []byte, stream bool) 
 		result, _ = sjson.DeleteBytes(result, "context_management")
 		result, _ = sjson.DeleteBytes(result, "user")
 		result, _ = sjson.DeleteBytes(result, "variant")
-
-		/* service_tier：-fast 时 ApplyThinking 写入 priority，其余透传客户端原值 */
-
-		/* 修复 tools 中 array 类型缺少 items 的 schema 问题 */
 		result = fixToolsArraySchema(result)
-
-		/* system role → developer 转换（Codex 不接受 system role） */
 		result = convertSystemRoleToDeveloper(result)
-
-		/* 使用 json_object/json_schema 时上游要求 input 含 "json" */
 		result = ensureInputContainsJSON(result)
 
 		return result
 	}
-
-	/* Chat Completions 格式：messages → input 转换 */
 	messages := gjson.GetBytes(rawJSON, "messages")
 	out, _ = sjson.SetRaw(out, "input", `[]`)
 
@@ -142,7 +121,6 @@ func ConvertOpenAIRequestToCodex(modelName string, rawJSON []byte, stream bool) 
 
 			switch role {
 			case "tool":
-				/* tool 消息转为 function_call_output */
 				funcOutput := `{}`
 				funcOutput, _ = sjson.Set(funcOutput, "type", "function_call_output")
 				funcOutput, _ = sjson.Set(funcOutput, "call_id", m.Get("tool_call_id").String())
@@ -150,7 +128,6 @@ func ConvertOpenAIRequestToCodex(modelName string, rawJSON []byte, stream bool) 
 				out, _ = sjson.SetRaw(out, "input.-1", funcOutput)
 
 			default:
-				/* 常规消息 */
 				msg := `{}`
 				msg, _ = sjson.Set(msg, "type", "message")
 				if role == "system" {
@@ -159,8 +136,6 @@ func ConvertOpenAIRequestToCodex(modelName string, rawJSON []byte, stream bool) 
 					msg, _ = sjson.Set(msg, "role", role)
 				}
 				msg, _ = sjson.SetRaw(msg, "content", `[]`)
-
-				/* 处理内容 */
 				c := m.Get("content")
 				if c.Exists() && c.Type == gjson.String && c.String() != "" {
 					partType := "input_text"
@@ -213,8 +188,6 @@ func ConvertOpenAIRequestToCodex(modelName string, rawJSON []byte, stream bool) 
 					}
 				}
 				out, _ = sjson.SetRaw(out, "input.-1", msg)
-
-				/* assistant 消息的 tool_calls 转为独立的 function_call 对象 */
 				if role == "assistant" {
 					toolCalls := m.Get("tool_calls")
 					if toolCalls.Exists() && toolCalls.IsArray() {
@@ -241,8 +214,6 @@ func ConvertOpenAIRequestToCodex(modelName string, rawJSON []byte, stream bool) 
 			}
 		}
 	}
-
-	/* 映射 response_format 到 text.format */
 	rf := gjson.GetBytes(rawJSON, "response_format")
 	if rf.Exists() {
 		if !gjson.Get(out, "text").Exists() {
@@ -270,8 +241,6 @@ func ConvertOpenAIRequestToCodex(modelName string, rawJSON []byte, stream bool) 
 			}
 		}
 	}
-
-	/* 映射 tools */
 	tools := gjson.GetBytes(rawJSON, "tools")
 	if tools.IsArray() && len(tools.Array()) > 0 {
 		out, _ = sjson.SetRaw(out, "tools", `[]`)
@@ -294,7 +263,6 @@ func ConvertOpenAIRequestToCodex(modelName string, rawJSON []byte, stream bool) 
 				if v := t.Get("description"); v.Exists() {
 					item, _ = sjson.Set(item, "description", v.Value())
 				}
-				/* 将 format 信息编码到 parameters 的 description 中 */
 				if format := t.Get("format"); format.Exists() {
 					paramSchema := `{"type":"object","properties":{"patch":{"type":"string","description":"The patch content"}}}`
 					item, _ = sjson.SetRaw(item, "parameters", paramSchema)
@@ -304,8 +272,6 @@ func ConvertOpenAIRequestToCodex(modelName string, rawJSON []byte, stream bool) 
 				out, _ = sjson.SetRaw(out, "tools.-1", item)
 				continue
 			}
-
-			/* 非 function/custom 类型直接透传 */
 			if toolType != "" && toolType != "function" && t.IsObject() {
 				out, _ = sjson.SetRaw(out, "tools.-1", t.Raw)
 				continue
@@ -368,12 +334,16 @@ func ConvertOpenAIRequestToCodex(modelName string, rawJSON []byte, stream bool) 
 			}
 		}
 	}
-
-	/* -fast 时为 priority；其余透传客户端自带的 service_tier（若有） */
 	if v := gjson.GetBytes(rawJSON, "service_tier"); v.Exists() {
 		if st := strings.TrimSpace(v.String()); st != "" {
 			out, _ = sjson.Set(out, "service_tier", st)
 		}
+	}
+	if v := gjson.GetBytes(rawJSON, "model_context_window"); v.Exists() {
+		out, _ = sjson.SetRaw(out, "model_context_window", v.Raw)
+	}
+	if v := gjson.GetBytes(rawJSON, "model_auto_compact_token_limit"); v.Exists() {
+		out, _ = sjson.SetRaw(out, "model_auto_compact_token_limit", v.Raw)
 	}
 
 	out, _ = sjson.Set(out, "store", false)

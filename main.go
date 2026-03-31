@@ -160,7 +160,7 @@ func main() {
 	}
 	manager := auth.NewManager(cfg.AuthDir, db, cfg.ProxyURL, cfg.RefreshInterval, selector, cfg.EnableHTTP2, managerOpts)
 	manager.SetRefreshConcurrency(cfg.RefreshConcurrency)
-	quotaChecker := auth.NewQuotaChecker(cfg.BaseURL, cfg.ProxyURL, cfg.QuotaCheckConcurrency, cfg.EnableHTTP2, cfg.BackendDomain, cfg.BackendResolveAddress)
+	quotaChecker := auth.NewQuotaChecker(cfg.BaseURL, cfg.ProxyURL, cfg.QuotaCheckConcurrency, cfg.EnableHTTP2, cfg.BackendDomain, cfg.BackendResolveAddress, time.Duration(cfg.QuotaCheckCacheTTLSec)*time.Second)
 	manager.SetPostRefreshQuotaChecker(quotaChecker)
 
 	/* 启动后台任务 */
@@ -264,13 +264,16 @@ func main() {
 
 	/* 初始化执行器 */
 	exec := executor.NewExecutor(cfg.BaseURL, cfg.ProxyURL, executor.HTTPPoolConfig{
-		MaxConnsPerHost:      cfg.MaxConnsPerHost,
-		MaxIdleConns:         cfg.MaxIdleConns,
-		MaxIdleConnsPerHost:  cfg.MaxIdleConnsPerHost,
-		EnableHTTP2:          cfg.EnableHTTP2,
-		BackendDomain:        cfg.BackendDomain,
-		ResolveAddress:       cfg.BackendResolveAddress,
-		KeepaliveIntervalSec: cfg.KeepaliveInterval,
+		MaxConnsPerHost:         cfg.MaxConnsPerHost,
+		MaxIdleConns:            cfg.MaxIdleConns,
+		MaxIdleConnsPerHost:     cfg.MaxIdleConnsPerHost,
+		EnableHTTP2:             cfg.EnableHTTP2,
+		BackendDomain:           cfg.BackendDomain,
+		ResolveAddress:          cfg.BackendResolveAddress,
+		KeepaliveIntervalSec:    cfg.KeepaliveInterval,
+		IdleConnTimeoutSec:      cfg.UpstreamIdleConnTimeoutSec,
+		TLSHandshakeTimeoutSec:  cfg.UpstreamTLSHandshakeTimeoutSec,
+		HTTP2MaxConnsPerHostCap: cfg.HTTP2MaxConnsPerHostCap,
 	})
 
 	/* 延迟启动连接池保活（在服务启动后异步进行） */
@@ -282,7 +285,7 @@ func main() {
 
 	/* 初始化 HTTP 服务 */
 	r := router.New()
-	proxyHandler := handler.NewProxyHandler(manager, exec, cfg.APIKeys, cfg.MaxRetry, cfg.EnableHealthyRetry, cfg.ProxyURL, cfg.BaseURL, cfg.EnableHTTP2, cfg.BackendDomain, cfg.BackendResolveAddress, cfg.QuotaCheckConcurrency, quotaChecker, cfg.EmptyRetryMax, cfg.DebugUpstreamStream, static.IndexHTML)
+	proxyHandler := handler.NewProxyHandler(manager, exec, cfg.APIKeys, cfg.MaxRetry, cfg.EnableHealthyRetry, cfg.ProxyURL, cfg.BaseURL, cfg.EnableHTTP2, cfg.BackendDomain, cfg.BackendResolveAddress, cfg.QuotaCheckConcurrency, cfg.QuotaCheckCacheTTLSec, quotaChecker, cfg.EmptyRetryMax, cfg.DebugUpstreamStream, static.IndexHTML)
 	proxyHandler.RegisterRoutes(r)
 
 	appHandler := r.Handler

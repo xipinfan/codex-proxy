@@ -19,16 +19,18 @@ const MaxConnsPerHostHTTP2Cap = 30
 // UpstreamTransportConfig 构建指向 Codex / 上游 API 的共享 *http.Transport。
 // ResponseHeaderTimeout、TLSHandshakeTimeout、IdleConnTimeout、ExpectContinueTimeout 为 0 时 net/http 表示不限制。
 type UpstreamTransportConfig struct {
-	DialContext           func(context.Context, string, string) (net.Conn, error)
-	ProxyURL              string
-	MaxIdleConns          int
-	MaxIdleConnsPerHost   int
-	MaxConnsPerHost       int
-	EnableHTTP2           bool
-	ResponseHeaderTimeout time.Duration
-	TLSHandshakeTimeout   time.Duration
-	IdleConnTimeout       time.Duration
-	ExpectContinueTimeout time.Duration
+	DialContext         func(context.Context, string, string) (net.Conn, error)
+	ProxyURL            string
+	MaxIdleConns        int
+	MaxIdleConnsPerHost int
+	MaxConnsPerHost     int
+	/* HTTP2MaxConnsPerHostCap 为 0 时使用 MaxConnsPerHostHTTP2Cap；>0 时覆盖 h2 下单主机 TCP 连接上限 */
+	HTTP2MaxConnsPerHostCap int
+	EnableHTTP2             bool
+	ResponseHeaderTimeout   time.Duration
+	TLSHandshakeTimeout     time.Duration
+	IdleConnTimeout         time.Duration
+	ExpectContinueTimeout   time.Duration
 	/* WriteBufferSize / ReadBufferSize 为 0 时使用 net/http 默认值 */
 	WriteBufferSize    int
 	ReadBufferSize     int
@@ -38,8 +40,12 @@ type UpstreamTransportConfig struct {
 // NewUpstreamTransport 创建配置一致的出站 Transport（连接池、HTTP/2、h2 连接数上限等）。
 func NewUpstreamTransport(cfg UpstreamTransportConfig) *http.Transport {
 	maxConns := cfg.MaxConnsPerHost
-	if cfg.EnableHTTP2 && maxConns > MaxConnsPerHostHTTP2Cap {
-		maxConns = MaxConnsPerHostHTTP2Cap
+	h2Cap := MaxConnsPerHostHTTP2Cap
+	if cfg.HTTP2MaxConnsPerHostCap > 0 {
+		h2Cap = cfg.HTTP2MaxConnsPerHostCap
+	}
+	if cfg.EnableHTTP2 && maxConns > h2Cap {
+		maxConns = h2Cap
 	}
 
 	tlsConf := &tls.Config{InsecureSkipVerify: false}

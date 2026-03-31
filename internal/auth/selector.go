@@ -8,6 +8,7 @@ package auth
 
 import (
 	"fmt"
+	"runtime"
 	"sort"
 	"sync/atomic"
 	"time"
@@ -18,6 +19,12 @@ const availableCacheTTLMs = 200
 
 /* 选号时距 access_token 过期不足该窗口则视为不可用（与后台刷新阈值一致） */
 const pickAvoidTokenExpireMarginMs = int64(5 * 60 * 1000)
+
+/* cacheRebuildSpinMax 缓存被清空后未抢到重建 CAS 的 goroutine 自旋等待次数，避免并行各自 filterAvailable */
+const cacheRebuildSpinMax = 4096
+
+/* maxPickProbePerPass 单次从 RR 缓存切片上环形探测「仍可选」账号的步数上限 */
+const maxPickProbePerPass = 128
 
 /**
  * Selector 定义账号选择器接口
@@ -74,16 +81,57 @@ func (s *RoundRobinSelector) InvalidateAvailableCache() {
  * @returns error - 没有可用账号时返回错误
  */
 func (s *RoundRobinSelector) Pick(model string, accounts []*Account) (*Account, error) {
-	available := s.getOrRefreshCache(accounts)
+	_ = model
+	nowMs := time.Now().UnixMilli()
+	const maxRebuildPasses = 2
+	for pass := 0; pass < maxRebuildPasses; pass++ {
+		available := s.getOrRefreshCache(accounts)
+		n := len(available)
+		if n == 0 {
+			return nil, fmt.Errorf("没有可用的 Codex 账号")
+		}
+		maxProbe := n
+		if maxProbe > maxPickProbePerPass {
+			maxProbe = maxPickProbePerPass
+		}
+		for casRound := 0; casRound < 16; casRound++ {
+			start := s.cursor.Load()
+			picked := -1
+			for probe := 0; probe < maxProbe; probe++ {
+				idx := int((start + 1 + uint64(probe)) % uint64(n))
+				acc := available[idx]
+				if accountPickableAt(nowMs, acc) {
+					picked = probe
+					break
+				}
+			}
+			if picked < 0 {
+				break
+			}
+			newCursor := start + 1 + uint64(picked)
+			if s.cursor.CompareAndSwap(start, newCursor) {
+				idx := int((start + 1 + uint64(picked)) % uint64(n))
+				return available[idx], nil
+			}
+		}
+		s.InvalidateAvailableCache()
+		nowMs = time.Now().UnixMilli()
+	}
+	/* 缓存与 CAS 争用下仍无满意结果：全量过滤后线性找第一个可选号 */
+	available := filterAvailable(accounts)
 	if len(available) == 0 {
 		return nil, fmt.Errorf("没有可用的 Codex 账号")
 	}
-
-	/* 原子递增游标，无锁选择 */
-	idx := s.cursor.Add(1) - 1
-	selected := available[idx%uint64(len(available))]
-
-	return selected, nil
+	n := len(available)
+	start := s.cursor.Add(1) - 1
+	for probe := 0; probe < n; probe++ {
+		idx := int((start + uint64(probe)) % uint64(n))
+		acc := available[idx]
+		if accountPickableAt(nowMs, acc) {
+			return acc, nil
+		}
+	}
+	return nil, fmt.Errorf("没有可用的 Codex 账号")
 }
 
 /**
@@ -103,9 +151,21 @@ func (s *RoundRobinSelector) getOrRefreshCache(accounts []*Account) []*Account {
 
 	/* CAS 抢占刷新权，防止多 goroutine 同时刷新 */
 	if !s.refreshing.CompareAndSwap(0, 1) {
-		/* 其他 goroutine 正在刷新，使用旧缓存或直接过滤 */
+		/* 其他 goroutine 正在刷新，使用旧缓存；缓存被清空则自旋等待重建，避免惊群式并行 filterAvailable */
 		if c != nil {
 			return c.accounts
+		}
+		for spin := 0; spin < cacheRebuildSpinMax; spin++ {
+			if c2 := s.cachePtr.Load(); c2 != nil {
+				return c2.accounts
+			}
+			if s.refreshing.Load() == 0 {
+				break
+			}
+			runtime.Gosched()
+		}
+		if c2 := s.cachePtr.Load(); c2 != nil {
+			return c2.accounts
 		}
 		return filterAvailable(accounts)
 	}
@@ -214,6 +274,25 @@ func sortByUsedPercent(accounts []*Account) {
 }
 
 /**
+ * accountPickableAt 与 filterAvailable 单账号语义一致，供 RR 缓存出号前二次校验
+ */
+func accountPickableAt(nowMs int64, acc *Account) bool {
+	status := AccountStatus(acc.atomicStatus.Load())
+	switch status {
+	case StatusDisabled:
+		return false
+	case StatusCooldown:
+		if nowMs < acc.atomicCooldownMs.Load() {
+			return false
+		}
+	}
+	if expMs := acc.accessExpireUnixMs.Load(); expMs > 0 && nowMs >= expMs-pickAvoidTokenExpireMarginMs {
+		return false
+	}
+	return true
+}
+
+/**
  * filterAvailable 过滤出当前可用的账号
  * 使用原子字段读取状态，完全无锁，适合 2w+ 账号高并发场景
  * @param accounts - 全部账号列表
@@ -224,21 +303,9 @@ func filterAvailable(accounts []*Account) []*Account {
 	available := make([]*Account, 0, len(accounts))
 
 	for _, acc := range accounts {
-		/* 原子读取状态，无锁 */
-		status := AccountStatus(acc.atomicStatus.Load())
-		switch status {
-		case StatusDisabled:
-			continue
-		case StatusCooldown:
-			if nowMs < acc.atomicCooldownMs.Load() {
-				continue
-			}
+		if accountPickableAt(nowMs, acc) {
+			available = append(available, acc)
 		}
-		/* 即将过期的 access_token 不参与分配，避免周期性未刷新的号在调用时 401 */
-		if expMs := acc.accessExpireUnixMs.Load(); expMs > 0 && nowMs >= expMs-pickAvoidTokenExpireMarginMs {
-			continue
-		}
-		available = append(available, acc)
 	}
 
 	return available

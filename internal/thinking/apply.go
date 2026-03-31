@@ -28,15 +28,15 @@ var levelToBudgetMap = map[string]int{
 
 /**
  * ApplyThinking 将思考配置和服务层级应用到请求体
- * 解析模型名中的思考后缀和 -fast 后缀，写入请求 JSON
+ * 解析模型名中的思考后缀、-fast、-1m 后缀，写入请求 JSON
  *
  * 无后缀模型（如 gpt-5、gpt-5-codex）且客户端未传思考相关参数时，不设置 reasoning.effort，
  * 即默认按「不传递」处理，由上游按自身策略（如 auto）生效。
  *
  * @param body - 原始请求体 JSON
- * @param model - 模型名（可能包含思考后缀和/或 -fast 后缀）
+ * @param model - 模型名
  * @returns []byte - 处理后的请求体 JSON
- * @returns string - 去除思考后缀与 -fast 后的基础模型名（含分支）
+ * @returns string - 去除思考后缀与 -fast 后的基础模型名
  */
 func ApplyThinking(body []byte, model string) ([]byte, string) {
 	parsed := ParseModelSuffix(model)
@@ -48,15 +48,19 @@ func ApplyThinking(body []byte, model string) ([]byte, string) {
 	} else {
 		config = extractConfigFromBody(body)
 	}
-
-	/* 仅当有思考配置时才写入请求体 */
 	if hasThinkingConfig(config) {
 		body = applyCodexThinking(body, config)
+		if parsed.HasSuffix {
+			body, _ = sjson.DeleteBytes(body, "reasoning_effort")
+			body, _ = sjson.DeleteBytes(body, "variant")
+		}
 	}
-
-	/* 仅模型名带 -fast 后缀时写入 Priority 服务层级 */
 	if parsed.IsFast {
-		body, _ = sjson.SetBytes(body, "service_tier", "priority")
+		body, _ = sjson.SetBytes(body, "service_tier", "fast")
+	}
+	if parsed.Is1M {
+		body, _ = sjson.SetBytes(body, "model_context_window", 1047576)
+		body, _ = sjson.SetBytes(body, "model_auto_compact_token_limit", 105197)
 	}
 
 	return body, baseModel
@@ -64,11 +68,6 @@ func ApplyThinking(body []byte, model string) ([]byte, string) {
 
 /**
  * extractConfigFromBody 从请求体中提取思考配置
- * 支持多种格式（按优先级）：
- *   - Codex: reasoning.effort
- *   - OpenAI: reasoning_effort
- *   - OpenWork 等客户端: variant（作为 reasoning_effort 的备选）
- *
  * @param body - 请求体 JSON
  * @returns ThinkingConfig - 提取的思考配置
  */
@@ -76,8 +75,6 @@ func extractConfigFromBody(body []byte) ThinkingConfig {
 	if len(body) == 0 || !gjson.ValidBytes(body) {
 		return ThinkingConfig{}
 	}
-
-	/* 检查 Codex 格式 reasoning.effort */
 	if effort := gjson.GetBytes(body, "reasoning.effort"); effort.Exists() {
 		value := strings.ToLower(strings.TrimSpace(effort.String()))
 		if value == "none" {
@@ -87,8 +84,6 @@ func extractConfigFromBody(body []byte) ThinkingConfig {
 			return ThinkingConfig{Mode: ModeLevel, Level: ThinkingLevel(value)}
 		}
 	}
-
-	/* 检查 OpenAI 格式 reasoning_effort */
 	if effort := gjson.GetBytes(body, "reasoning_effort"); effort.Exists() {
 		value := strings.ToLower(strings.TrimSpace(effort.String()))
 		if value == "none" {
@@ -98,12 +93,6 @@ func extractConfigFromBody(body []byte) ThinkingConfig {
 			return ThinkingConfig{Mode: ModeLevel, Level: ThinkingLevel(value)}
 		}
 	}
-
-	/*
-	 * 检查 variant 参数（OpenWork 等客户端使用）
-	 * variant 原用于 Claude 模型的思考级别，这里作为 reasoning_effort 的备选
-	 * 参考 issue #258
-	 */
 	if variant := gjson.GetBytes(body, "variant"); variant.Exists() {
 		value := strings.ToLower(strings.TrimSpace(variant.String()))
 		if value == "none" {
@@ -119,8 +108,6 @@ func extractConfigFromBody(body []byte) ThinkingConfig {
 
 /**
  * applyCodexThinking 将思考配置写入 Codex 请求体
- * 设置 reasoning.effort 字段
- *
  * @param body - 请求体 JSON
  * @param config - 思考配置
  * @returns []byte - 修改后的请求体
@@ -142,7 +129,6 @@ func applyCodexThinking(body []byte, config ThinkingConfig) []byte {
 	case ModeAuto:
 		effort = "medium"
 	case ModeBudget:
-		/* 将预算转换为最近的级别 */
 		effort = budgetToLevel(config.Budget)
 		if effort == "" {
 			return body

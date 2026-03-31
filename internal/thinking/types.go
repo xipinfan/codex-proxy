@@ -69,17 +69,18 @@ type ThinkingConfig struct {
 
 /**
  * ParseResult 模型名解析结果
- * 从连字符格式（如 gpt-5-xhigh、gpt-5.4-fast）中提取模型名、思考配置和服务层级
  * @field ModelName - 去除所有后缀后的真实模型名
  * @field HasSuffix - 是否检测到有效的思考后缀
  * @field RawSuffix - 原始思考后缀值
- * @field IsFast - 是否启用 fast 模式（模型名以 -fast 结尾）
- * @field ServiceTier - 服务层级（-fast 后缀时为 "priority"，否则为空）
+ * @field IsFast - 是否启用 fast 模式
+ * @field Is1M - 是否启用 1M 上下文模式
+ * @field ServiceTier - 服务层级
  */
 type ParseResult struct {
 	ModelName   string
 	HasSuffix   bool
 	RawSuffix   string
 	IsFast      bool
+	Is1M        bool
 	ServiceTier string
 }

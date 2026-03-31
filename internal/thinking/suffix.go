@@ -31,10 +31,7 @@ var knownAmbiguousModels = map[string]bool{
 
 /**
  * ParseModelSuffix 从模型名尾部逆向解析后缀
- * 不依赖模型白名单，纯粹匹配已知后缀关键字
- * 任何未识别的模型名都直接保留并转发给上游
- *
- * @param model - 原始模型名（可能包含思考后缀和/或 -fast 后缀）
+ * @param model - 原始模型名
  * @returns ParseResult - 解析结果
  */
 func ParseModelSuffix(model string) ParseResult {
@@ -44,27 +41,21 @@ func ParseModelSuffix(model string) ParseResult {
 	}
 
 	result := ParseResult{}
-
-	/*
-	 * 第一步：从右侧剥离 -fast（服务层级）
-	 */
 	lower := strings.ToLower(model)
 	if strings.HasSuffix(lower, "-fast") && len(model) > 5 {
 		result.IsFast = true
-		result.ServiceTier = "priority" /* 与 ApplyThinking 写入上游的 service_tier 一致 */
+		result.ServiceTier = "fast"
 		model = model[:len(model)-5]
+		lower = strings.ToLower(model)
 	}
-
-	/*
-	 * 第二步：从右侧剥离思考后缀（级别名或数字预算）
-	 * 找到最后一个连字符，检查尾段是否为已知思考后缀
-	 * 先排除已知的歧义模型名（如 codex-max、codex-auto）
-	 */
+	if strings.HasSuffix(lower, "-1m") && len(model) > 3 {
+		result.Is1M = true
+		model = model[:len(model)-3]
+		lower = strings.ToLower(model)
+	}
 	lastDash := strings.LastIndex(model, "-")
 	if lastDash > 0 && lastDash < len(model)-1 {
 		tail := strings.ToLower(model[lastDash+1:])
-
-		/* 检查完整模型名是否在歧义白名单中（精确匹配） */
 		isAmbiguous := knownAmbiguousModels[strings.ToLower(model)]
 
 		if !isAmbiguous {
@@ -74,31 +65,18 @@ func ParseModelSuffix(model string) ParseResult {
 				result.RawSuffix = tail
 				model = model[:lastDash]
 			} else if v, err := strconv.Atoi(tail); err == nil && v > 100 {
-				/*
-				 * 匹配到数字 token 预算（必须 > 100）
-				 * 版本号（如 5、4、3）不会超过 100，token 预算通常 > 512
-				 * 避免 gpt-5 中的 "5" 被误判为预算
-				 */
 				result.HasSuffix = true
 				result.RawSuffix = tail
 				model = model[:lastDash]
 			}
 		}
 	}
-
-	/* 剩余部分即为真实模型名 */
 	result.ModelName = model
 	return result
 }
 
 /**
  * ParseSuffixToConfig 将原始后缀字符串转换为 ThinkingConfig
- *
- * 解析优先级：
- *   1. 特殊值：none → ModeNone, auto/-1 → ModeAuto
- *   2. 级别名：minimal/low/medium/high/xhigh/max → ModeLevel
- *   3. 数字值：正整数 → ModeBudget, 0 → ModeNone
- *
  * @param rawSuffix - 原始后缀字符串
  * @returns ThinkingConfig - 解析后的思考配置
  */
@@ -107,16 +85,12 @@ func ParseSuffixToConfig(rawSuffix string) ThinkingConfig {
 	if rawSuffix == "" {
 		return ThinkingConfig{}
 	}
-
-	/* 1. 特殊值 */
 	switch rawSuffix {
 	case "none":
 		return ThinkingConfig{Mode: ModeNone, Budget: 0}
 	case "auto", "-1":
 		return ThinkingConfig{Mode: ModeAuto, Budget: -1}
 	}
-
-	/* 2. 级别名 */
 	switch rawSuffix {
 	case "minimal":
 		return ThinkingConfig{Mode: ModeLevel, Level: LevelMinimal}
@@ -131,8 +105,6 @@ func ParseSuffixToConfig(rawSuffix string) ThinkingConfig {
 	case "max":
 		return ThinkingConfig{Mode: ModeLevel, Level: LevelMax}
 	}
-
-	/* 3. 数字值 */
 	if value, err := strconv.Atoi(rawSuffix); err == nil {
 		if value == 0 {
 			return ThinkingConfig{Mode: ModeNone, Budget: 0}
@@ -141,6 +113,5 @@ func ParseSuffixToConfig(rawSuffix string) ThinkingConfig {
 			return ThinkingConfig{Mode: ModeBudget, Budget: value}
 		}
 	}
-
 	return ThinkingConfig{}
 }

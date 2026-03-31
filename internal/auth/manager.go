@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -674,6 +673,7 @@ func accountFromDBRow(id int64, accountID, email, idToken, accessToken, refreshT
 	}
 	if lastUsedAt.Valid {
 		acc.LastUsedAt = lastUsedAt.Time
+		acc.lastSuccessUnixMs.Store(lastUsedAt.Time.UnixMilli())
 	}
 	acc.SyncAccessExpireFromToken()
 	return acc, true
@@ -1007,15 +1007,20 @@ func (m *Manager) PickExcluding(model string, excluded map[string]bool) (*Accoun
 		return m.selector.Pick(model, allAccounts)
 	}
 
-	/* 第一层过滤：排除掉已失败的账号 */
-	capFiltered := len(allAccounts) - len(excluded)
-	if capFiltered < 0 {
-		capFiltered = 0
+	capGuess := len(allAccounts) - len(excluded)
+	if capGuess < 0 {
+		capGuess = 0
 	}
-	filtered := make([]*Account, 0, capFiltered)
+	nowMs := time.Now().UnixMilli()
+	filtered := make([]*Account, 0, capGuess)
+	activeOnly := make([]*Account, 0, capGuess)
 	for _, acc := range allAccounts {
-		if !excluded[acc.FilePath] {
-			filtered = append(filtered, acc)
+		if excluded[acc.FilePath] {
+			continue
+		}
+		filtered = append(filtered, acc)
+		if accountPickableAt(nowMs, acc) {
+			activeOnly = append(activeOnly, acc)
 		}
 	}
 
@@ -1023,29 +1028,9 @@ func (m *Manager) PickExcluding(model string, excluded map[string]bool) (*Accoun
 		return nil, fmt.Errorf("没有更多可用账号（已排除 %d 个）", len(excluded))
 	}
 
-	/* 第二层过滤：优先选择活跃的账号（非冷却非禁用）*/
-	nowMs := time.Now().UnixMilli()
-	activeOnly := make([]*Account, 0, len(filtered))
-	for _, acc := range filtered {
-		status := AccountStatus(acc.atomicStatus.Load())
-		/* 跳过禁用和冷却中的账号 */
-		if status == StatusDisabled {
-			continue
-		}
-		if status == StatusCooldown {
-			if nowMs < acc.atomicCooldownMs.Load() {
-				continue
-			}
-		}
-		activeOnly = append(activeOnly, acc)
-	}
-
-	/* 如果有活跃账号，优先用活跃账号；否则用过滤后的列表（可能包含冷却的） */
 	if len(activeOnly) > 0 {
 		return m.selector.Pick(model, activeOnly)
 	}
-
-	/* 没有活跃账号了，退而求其次用原始过滤列表 */
 	return m.selector.Pick(model, filtered)
 }
 
@@ -1055,53 +1040,59 @@ func (m *Manager) PickExcluding(model string, excluded map[string]bool) (*Accoun
 func (m *Manager) PickRecentlySuccessful(model string, excluded map[string]bool) (*Account, error) {
 	_ = model
 	allAccounts := *m.accountsPtr.Load()
-	type cand struct {
-		acc *Account
-		t   time.Time
-	}
-	var list []cand
+	/* 按 lastSuccessUnixMs 线性扫描，等价于原 sort 后取最近，避免 O(N log N) */
+	var bestAll *Account
+	var bestAllMs int64 = -1
+	var bestOpen *Account
+	var bestOpenMs int64 = -1
 	for _, acc := range allAccounts {
 		st := AccountStatus(acc.atomicStatus.Load())
 		if st == StatusDisabled || st == StatusCooldown {
 			continue
 		}
-		t := acc.GetLastUsedAt()
-		if t.IsZero() {
+		ms := acc.lastSuccessUnixMs.Load()
+		if ms <= 0 {
 			continue
 		}
-		list = append(list, cand{acc: acc, t: t})
+		fp := acc.FilePath
+		if betterRecentSuccess(ms, fp, bestAllMs, bestAll) {
+			bestAllMs = ms
+			bestAll = acc
+		}
+		if excluded != nil && excluded[fp] {
+			continue
+		}
+		if betterRecentSuccess(ms, fp, bestOpenMs, bestOpen) {
+			bestOpenMs = ms
+			bestOpen = acc
+		}
 	}
 
-	if len(list) == 0 {
-		/* 没有近期成功的账号，选任何可用的正常账号 */
+	if bestAll == nil {
 		for _, acc := range allAccounts {
 			st := AccountStatus(acc.atomicStatus.Load())
 			if st == StatusDisabled || st == StatusCooldown {
 				continue
 			}
-			/* 找到任何正常账号就用 */
 			return acc, nil
 		}
 		return nil, fmt.Errorf("没有可用账号")
 	}
-
-	sort.Slice(list, func(i, j int) bool {
-		if !list[i].t.Equal(list[j].t) {
-			return list[i].t.After(list[j].t)
-		}
-		return list[i].acc.FilePath < list[j].acc.FilePath
-	})
-
-	/* 优先选未被排除的最近成功账号 */
-	for _, c := range list {
-		if excluded == nil || !excluded[c.acc.FilePath] {
-			return c.acc, nil
-		}
+	if bestOpen != nil {
+		return bestOpen, nil
 	}
+	return bestAll, nil
+}
 
-	/* 所有最近成功的都被排除了，清空排除集合重选一个正常账号 */
-	/* 这样可以打破"所有号都失败"的死局，使用最近成功的账号再试一次*/
-	return list[0].acc, nil
+/* betterRecentSuccess 比较「更近的成功时间」，时间相同则 FilePath 较小者优先（与原 sort 稳定序一致） */
+func betterRecentSuccess(ms int64, fp string, bestMs int64, best *Account) bool {
+	if best == nil {
+		return true
+	}
+	if ms != bestMs {
+		return ms > bestMs
+	}
+	return fp < best.FilePath
 }
 
 /**
