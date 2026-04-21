@@ -150,6 +150,7 @@ func NewProxyHandler(manager *auth.Manager, exec *executor.Executor, apiKeys []s
 func (h *ProxyHandler) RegisterRoutes(r *fasthttprouter.Router) {
 	/* 首页 */
 	r.GET("/", h.handleIndex)
+	r.GET("/assets/{filepath:*}", h.handleStaticAsset)
 
 	/* 健康检查 */
 	r.GET("/health", h.handleHealth)
