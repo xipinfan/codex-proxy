@@ -24,6 +24,7 @@ export default defineConfig({
       '/refresh': 'http://127.0.0.1:8080',
       '/check-quota': 'http://127.0.0.1:8080',
       '/recover-auth': 'http://127.0.0.1:8080',
+      '/oauth': 'http://127.0.0.1:8080',
       '/admin': 'http://127.0.0.1:8080',
     },
   },

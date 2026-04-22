@@ -69,6 +69,7 @@ var responsesWSUpgrader = websocket.FastHTTPUpgrader{
 type ProxyHandler struct {
 	manager                   *auth.Manager
 	executor                  *executor.Executor
+	codexOAuth                *auth.CodexOAuthFlow
 	apiKeys                   []string
 	maxRetry                  int
 	enableHealthyRetry        bool
@@ -121,6 +122,7 @@ func NewProxyHandler(manager *auth.Manager, exec *executor.Executor, apiKeys []s
 	return &ProxyHandler{
 		manager:             manager,
 		executor:            exec,
+		codexOAuth:          auth.NewCodexOAuthFlow(proxyURL, enableHTTP2),
 		apiKeys:             apiKeys,
 		maxRetry:            maxRetry,
 		enableHealthyRetry:  enableHealthyRetry,
@@ -191,16 +193,27 @@ func (h *ProxyHandler) RegisterRoutes(r *fasthttprouter.Router) {
 	refreshHandler := h.handleRefresh
 	checkQuotaHandler := h.handleCheckQuota
 	recoverAuthHandler := h.handleRecoverAuth
+	oauthStartHandler := h.handleCodexOAuthStart
+	oauthResultHandler := h.handleCodexOAuthResult
+	oauthCompleteHandler := h.handleCodexOAuthComplete
+	accountsDeleteHandler := h.handleAccountsDelete
 	if len(h.apiKeys) > 0 {
 		statsHandler = h.authMiddleware(h.handleStats)
 		refreshHandler = h.authMiddleware(h.handleRefresh)
 		checkQuotaHandler = h.authMiddleware(h.handleCheckQuota)
 		recoverAuthHandler = h.authMiddleware(h.handleRecoverAuth)
+		oauthStartHandler = h.authMiddleware(h.handleCodexOAuthStart)
+		oauthResultHandler = h.authMiddleware(h.handleCodexOAuthResult)
+		oauthCompleteHandler = h.authMiddleware(h.handleCodexOAuthComplete)
+		accountsDeleteHandler = h.authMiddleware(h.handleAccountsDelete)
 	}
 	r.GET("/stats", statsHandler)
 	r.POST("/refresh", refreshHandler)
 	r.POST("/check-quota", checkQuotaHandler)
 	r.POST("/recover-auth", recoverAuthHandler)
+	r.POST("/oauth/codex/start", oauthStartHandler)
+	r.GET("/oauth/codex/result", oauthResultHandler)
+	r.POST("/oauth/codex/complete", oauthCompleteHandler)
 
 	accountsIngestHandler := h.handleAccountsIngest
 	if len(h.apiKeys) > 0 {
@@ -208,6 +221,7 @@ func (h *ProxyHandler) RegisterRoutes(r *fasthttprouter.Router) {
 	}
 	r.POST("/admin/accounts/ingest", accountsIngestHandler)
 	r.GET("/admin/accounts/ingest", accountsIngestHandler)
+	r.POST("/admin/accounts/delete", accountsDeleteHandler)
 }
 
 /**

@@ -1,5 +1,4 @@
-import { ingestAccounts } from './api';
-import type { ConsoleSettings, OAuthCallbackPayload, TokenFilePayload } from './types';
+import type { OAuthCallbackPayload, TokenFilePayload } from './types';
 
 export const codexOAuthPortalUrl = 'https://auth.openai.com/';
 
@@ -13,7 +12,7 @@ export function parseOAuthCallbackUrl(input: string): OAuthCallbackPayload {
   const idToken = params.get('id_token') ?? '';
 
   if (!refreshToken && !accessToken && !idToken) {
-    throw new Error('回调 URL 中至少需一项 OAuth token 字段');
+    throw new Error('回调地址中至少需要一个令牌字段');
   }
 
   return {
@@ -53,8 +52,4 @@ export function buildManualTokenFilePayload(input: Partial<TokenFilePayload>): T
     ...(input.email?.trim() ? { email: input.email.trim() } : {}),
     ...(input.expired?.trim() ? { expired: input.expired.trim() } : {}),
   };
-}
-
-export async function ingestAccountFromOAuth(settings: ConsoleSettings, callbackUrl: string) {
-  return ingestAccounts(settings, [buildOAuthTokenFilePayload(callbackUrl)]);
 }

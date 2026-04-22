@@ -15,6 +15,6 @@ describe('parseOAuthCallbackUrl', () => {
   });
 
   it('throws when no oauth token fields exist', () => {
-    expect(() => parseOAuthCallbackUrl('http://127.0.0.1:1455/callback#state=abc')).toThrow(/至少需一项/i);
+    expect(() => parseOAuthCallbackUrl('http://127.0.0.1:1455/callback#state=abc')).toThrow(/至少需要一个令牌字段/i);
   });
 });

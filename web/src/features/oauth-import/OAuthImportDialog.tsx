@@ -2,13 +2,14 @@ import { useEffect, useState } from 'react';
 
 import { Button } from '../../components/ui/Button';
 import { Modal } from '../../components/ui/Modal';
-import { buildManualTokenFilePayload, codexOAuthPortalUrl } from '../../lib/oauth';
-import type { IngestResult, TokenFilePayload } from '../../lib/types';
+import { buildManualTokenFilePayload } from '../../lib/oauth';
+import type { IngestResult, OAuthPollResponse, OAuthStartResponse, TokenFilePayload } from '../../lib/types';
 
 interface OAuthImportDialogProps {
   open: boolean;
   onClose: () => void;
-  onOAuthImport: (callbackUrl: string) => Promise<IngestResult | void>;
+  onOAuthStart: () => Promise<OAuthStartResponse>;
+  onOAuthPoll: (state: string) => Promise<OAuthPollResponse>;
   onManualImport: (payload: TokenFilePayload) => Promise<IngestResult | void>;
 }
 
@@ -30,24 +31,27 @@ function buildSuccessMessage(result: IngestResult | void): string {
   }
 
   const total = result.added + result.updated;
-  return result.failed > 0 ? `已导入 ${total} 个账号，失败 ${result.failed} 个。` : `已成功导入 ${total} 个账号。`;
+  const main = result.failed > 0 ? `已导入 ${total} 个账号，失败 ${result.failed} 个。` : `已成功导入 ${total} 个账号。`;
+  const validationText = result.validation?.message ? `校验结果：${result.validation.message}` : '';
+  return validationText ? `${main} ${validationText}` : main;
 }
 
-export function OAuthImportDialog({ open, onClose, onOAuthImport, onManualImport }: OAuthImportDialogProps) {
+export function OAuthImportDialog({ open, onClose, onOAuthStart, onOAuthPoll, onManualImport }: OAuthImportDialogProps) {
   const [mode, setMode] = useState<ImportMode>('oauth');
-  const [callbackUrl, setCallbackUrl] = useState('');
   const [manualForm, setManualForm] = useState<TokenFilePayload>(initialManualForm);
   const [errorMessage, setErrorMessage] = useState('');
   const [successMessage, setSuccessMessage] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isOpeningAuth, setIsOpeningAuth] = useState(false);
+  const [oauthState, setOauthState] = useState<string | null>(null);
 
   useEffect(() => {
     if (open) {
       setMode('oauth');
-      setCallbackUrl('');
       setManualForm(initialManualForm);
       setErrorMessage('');
       setSuccessMessage('');
+      setOauthState(null);
     }
   }, [open]);
 
@@ -55,27 +59,42 @@ export function OAuthImportDialog({ open, onClose, onOAuthImport, onManualImport
     setManualForm((current) => ({ ...current, [key]: value }));
   }
 
-  async function handleOAuthSubmit(event: React.FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-
-    if (!callbackUrl.trim()) {
-      setErrorMessage('请粘贴完整回调 URL');
-      setSuccessMessage('');
-      return;
-    }
-
+  async function handleOpenAuthPage() {
     setErrorMessage('');
     setSuccessMessage('');
-    setIsSubmitting(true);
-
+    setIsOpeningAuth(true);
     try {
-      const result = await onOAuthImport(callbackUrl.trim());
-      setSuccessMessage(buildSuccessMessage(result));
+      const started = await onOAuthStart();
+      setOauthState(started.state);
+      window.open(started.authorize_url, '_blank', 'noopener,noreferrer');
+      setSuccessMessage('授权页已打开。完成登录后会自动回调并导入，当前正在等待授权结果。');
+      setIsOpeningAuth(false);
+      await waitForOAuthResult(started.state, started.expires_in);
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : '导入失败。');
+      setErrorMessage(error instanceof Error ? error.message : '拉起授权页失败。');
     } finally {
-      setIsSubmitting(false);
+      setIsOpeningAuth(false);
     }
+  }
+
+  async function waitForOAuthResult(state: string, expiresIn: number) {
+    const deadline = Date.now() + Math.max(30, expiresIn) * 1000;
+    setIsSubmitting(true);
+    while (Date.now() < deadline) {
+      const result = await onOAuthPoll(state);
+      if (result.status === 'completed') {
+        setSuccessMessage(buildSuccessMessage(result.result));
+        setErrorMessage('');
+        setOauthState(null);
+        setIsSubmitting(false);
+        return;
+      }
+      if (result.status === 'failed') {
+        throw new Error(result.message || '授权失败。');
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, 600));
+    }
+    throw new Error('等待授权回调超时，请重新打开授权页。');
   }
 
   async function handleManualSubmit(event: React.FormEvent<HTMLFormElement>) {
@@ -106,8 +125,11 @@ export function OAuthImportDialog({ open, onClose, onOAuthImport, onManualImport
     <Modal open={open} onClose={onClose} title="导入 Codex 账号">
       <div className="mb-6 flex items-start justify-between gap-4">
         <div>
-          <p className="text-xs uppercase tracking-[0.22em] text-[color:var(--text-secondary)]">账号导入</p>
+          <p className="text-xs font-semibold tracking-[0.22em] text-[color:var(--text-secondary)]">账号导入</p>
           <h2 className="mt-2 text-2xl font-semibold tracking-[-0.04em]">把 Codex 账号加入账号池</h2>
+          <p className="mt-2 max-w-xl text-sm leading-6 text-[color:var(--text-secondary)]">
+            支持两种方式：打开授权页完成回调导入，或直接填写账号字段导入。含 <code>refresh_token</code> 的账号会在导入后自动校验有效性。
+          </p>
         </div>
         <Button variant="ghost" onClick={onClose}>
           关闭
@@ -116,7 +138,7 @@ export function OAuthImportDialog({ open, onClose, onOAuthImport, onManualImport
 
       <div className="mb-4 flex flex-wrap gap-2 rounded-[24px] bg-white/60 p-1">
         <Button variant={mode === 'oauth' ? 'primary' : 'secondary'} onClick={() => setMode('oauth')}>
-          OAuth 回调导入
+          授权回调导入
         </Button>
         <Button variant={mode === 'manual' ? 'primary' : 'secondary'} onClick={() => setMode('manual')}>
           字段直填导入
@@ -124,29 +146,28 @@ export function OAuthImportDialog({ open, onClose, onOAuthImport, onManualImport
       </div>
 
       {mode === 'oauth' ? (
-        <form className="grid gap-4" onSubmit={handleOAuthSubmit}>
-          <ol className="grid gap-3 rounded-[24px] border border-[color:var(--border-soft)] bg-white/70 p-4 text-sm leading-6 text-[color:var(--text-secondary)]">
-            <li>1. 打开 OpenAI 授权页并完成登录。</li>
-            <li>2. 浏览器跳回 localhost 后，复制完整回调 URL。</li>
-            <li>3. 粘贴到下方，解析并导入到当前账号池。</li>
-          </ol>
-
-          <div className="flex flex-wrap items-center gap-3">
-            <Button variant="secondary" onClick={() => window.open(codexOAuthPortalUrl, '_blank', 'noopener,noreferrer')}>
-              打开 OpenAI 授权页
-            </Button>
-            <span className="text-sm text-[color:var(--text-secondary)]">使用回调 URL 中的 token 字段完成导入。</span>
+        <div className="grid gap-4">
+          <div className="rounded-[24px] border border-[color:var(--border-soft)] bg-[rgba(255,250,245,0.84)] p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.72)]">
+            <p className="text-xs font-semibold tracking-[0.18em] text-[color:var(--text-secondary)]">授权导入流程</p>
+            <ol className="mt-3 grid gap-3 text-sm leading-6 text-[color:var(--text-secondary)]">
+              <li>1. 打开 OpenAI 授权页并完成登录。</li>
+              <li>2. 浏览器会跳回本机 <code>localhost:1455</code> 回调监听。</li>
+              <li>3. 控制台自动拿到授权 code，换取令牌并导入到当前账号池。</li>
+            </ol>
           </div>
 
-          <label className="grid gap-2 text-sm font-medium text-[color:var(--text-secondary)]">
-            <span>回调 URL</span>
-            <textarea
-              className="min-h-[140px] rounded-[24px] border border-[color:var(--border-soft)] bg-white/80 px-4 py-3 outline-none transition focus:border-[rgba(243,146,57,0.4)] focus:shadow-[0_0_0_4px_rgba(243,146,57,0.12)]"
-              value={callbackUrl}
-              onChange={(event) => setCallbackUrl(event.target.value)}
-              placeholder="http://127.0.0.1:1455/callback#access_token=..."
-            />
-          </label>
+          <div className="flex flex-wrap items-center gap-3">
+            <Button variant="secondary" disabled={isOpeningAuth || isSubmitting} onClick={() => void handleOpenAuthPage()}>
+              {isOpeningAuth ? '拉起中...' : isSubmitting ? '等待回调中...' : '打开 OpenAI 授权页'}
+            </Button>
+            <span className="text-sm text-[color:var(--text-secondary)]">授权地址由后端动态生成，并自动附带 PKCE 与 state 校验。</span>
+          </div>
+
+          {oauthState ? (
+            <p className="rounded-[20px] bg-white/70 px-4 py-3 text-sm text-[color:var(--text-secondary)]">
+              正在等待 state <code>{oauthState.slice(0, 8)}</code> 的回调结果，请在新打开的授权页完成登录。
+            </p>
+          ) : null}
 
           {errorMessage ? <p className="rounded-[20px] bg-[rgba(207,94,72,0.12)] px-4 py-3 text-sm text-[#8f2e1f]">{errorMessage}</p> : null}
           {successMessage ? <p className="rounded-[20px] bg-[rgba(59,184,197,0.14)] px-4 py-3 text-sm text-[#14626b]">{successMessage}</p> : null}
@@ -155,16 +176,16 @@ export function OAuthImportDialog({ open, onClose, onOAuthImport, onManualImport
             <Button variant="secondary" onClick={onClose}>
               稍后再说
             </Button>
-            <Button type="submit" disabled={isSubmitting}>
-              {isSubmitting ? '导入中...' : '解析并导入'}
-            </Button>
           </div>
-        </form>
+        </div>
       ) : (
         <form className="grid gap-4" onSubmit={handleManualSubmit}>
-          <p className="rounded-[24px] border border-[color:var(--border-soft)] bg-white/70 p-4 text-sm leading-6 text-[color:var(--text-secondary)]">
-            直接填写账号 token 字段并导入。至少填写 access_token、refresh_token 或 id_token 中的一项。
-          </p>
+          <div className="rounded-[24px] border border-[color:var(--border-soft)] bg-[rgba(255,250,245,0.84)] p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.72)]">
+            <p className="text-xs font-semibold tracking-[0.18em] text-[color:var(--text-secondary)]">字段直填导入</p>
+            <p className="mt-3 text-sm leading-6 text-[color:var(--text-secondary)]">
+              直接填写账号字段并导入。至少填写 <code>access_token</code>、<code>refresh_token</code> 或 <code>id_token</code> 中的一项；如果填写了 <code>refresh_token</code>，系统会在导入后自动尝试刷新校验。
+            </p>
+          </div>
 
           <div className="grid gap-4 md:grid-cols-2">
             <label className="grid gap-2 text-sm font-medium text-[color:var(--text-secondary)]">

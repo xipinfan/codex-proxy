@@ -21,7 +21,7 @@ describe('SettingsDialog', () => {
     );
 
     expect(screen.getByText(/控制台设置/i)).toBeInTheDocument();
-    await user.type(screen.getByLabelText(/API 基础地址/i), 'http://127.0.0.1:8080');
+    await user.type(screen.getByLabelText(/接口基础地址/i), 'http://127.0.0.1:8080');
     await user.click(screen.getByRole('button', { name: /保存设置/i }));
 
     expect(onSave).toHaveBeenCalledWith(

@@ -9,12 +9,11 @@ import { OAuthImportDialog } from '../oauth-import/OAuthImportDialog';
 import { SettingsDialog } from '../settings/SettingsDialog';
 import { AccountsTable } from './AccountsTable';
 import { StatsOverview } from './StatsOverview';
-import { fetchStats, ingestAccounts, runProgressAction } from '../../lib/api';
+import { deleteAccount, fetchStats, ingestAccounts, pollCodexOAuth, runProgressAction, startCodexOAuth } from '../../lib/api';
 import { formatCompactNumber } from '../../lib/format';
-import { ingestAccountFromOAuth } from '../../lib/oauth';
 import { loadConsoleSettings, saveConsoleSettings } from '../../lib/storage';
 import { adaptStatsResponse } from '../../lib/stats';
-import type { AccountView, ConsoleSettings, IngestResult, ProgressEvent, StatsQuery, StatsView, SummaryView, TokenFilePayload } from '../../lib/types';
+import type { AccountView, ConsoleSettings, IngestResult, OAuthPollResponse, OAuthStartResponse, ProgressEvent, StatsQuery, StatsView, SummaryView, TokenFilePayload } from '../../lib/types';
 
 type DashboardPreviewState = 'live' | 'ready' | 'empty' | 'error';
 type RequestState = 'loading' | 'ready' | 'empty' | 'error';
@@ -238,17 +237,23 @@ export function DashboardPage({
     setActionMessage({ tone: 'success', text: '设置已保存，面板将按新配置刷新。' });
   }
 
-  async function handleImport(callbackUrl: string): Promise<IngestResult> {
-    const result = await ingestAccountFromOAuth(settings, callbackUrl);
-    setActionMessage({
-      tone: result.failed > 0 ? 'error' : 'success',
-      text:
-        result.failed > 0
-          ? `已导入 ${result.added + result.updated} 个账号，失败 ${result.failed} 个。`
-          : `已成功导入 ${result.added + result.updated} 个账号。`,
-    });
-    setPage(1);
-    await loadStats(buildQuery(1, settings, query));
+  async function handleOAuthStart(): Promise<OAuthStartResponse> {
+    return startCodexOAuth(settings);
+  }
+
+  async function handleOAuthPoll(state: string): Promise<OAuthPollResponse> {
+    const result = await pollCodexOAuth(settings, state);
+    if (result.status === 'completed' && result.result) {
+      setActionMessage({
+        tone: result.result.failed > 0 ? 'error' : 'success',
+        text:
+          result.result.failed > 0
+            ? `已导入 ${result.result.added + result.result.updated} 个账号，失败 ${result.result.failed} 个。`
+            : `已成功导入 ${result.result.added + result.result.updated} 个账号。`,
+      });
+      setPage(1);
+      await loadStats(buildQuery(1, settings, query));
+    }
     return result;
   }
 
@@ -266,6 +271,13 @@ export function DashboardPage({
     return result;
   }
 
+  async function handleDeleteAccount(account: AccountView): Promise<void> {
+    await deleteAccount(settings, { email: account.email });
+    setSelectedAccountId(null);
+    setActionMessage({ tone: 'success', text: `已删除账号 ${account.email}` });
+    await loadStats(buildQuery(page, settings, query));
+  }
+
   return (
     <main className="mx-auto flex min-h-screen w-full max-w-[1480px] flex-col gap-6 px-4 py-5 sm:px-6 sm:py-8 lg:px-10">
       <header className="rounded-[32px] border border-white/50 bg-[color:var(--bg-surface)] p-6 shadow-[var(--shadow-soft)] backdrop-blur-xl">
@@ -278,7 +290,7 @@ export function DashboardPage({
             <div className="space-y-2">
               <h1 className="text-4xl font-semibold tracking-[-0.05em] sm:text-5xl">Codex 账号运维面板</h1>
               <p className="max-w-2xl text-base leading-7 text-[color:var(--text-secondary)]">
-                主表、抽屉和额度面板共用一套玻璃层级，方便你在一个工作面里看清池子健康度、活跃账号和导入动作。
+                用一张工作台看清账号池健康度、额度窗口和导入状态；异常账号会先冷却保留，避免因为临时失败误删有效凭据。
               </p>
             </div>
           </div>
@@ -312,9 +324,9 @@ export function DashboardPage({
         </div>
 
         <div className="mt-6 flex flex-wrap items-center gap-3 text-sm text-[color:var(--text-secondary)]">
-          <span className="rounded-full border border-[color:var(--border-soft)] bg-white/70 px-3 py-1">接口地址 {settings.baseUrl || '当前来源地址'}</span>
-          <span className="rounded-full border border-[color:var(--border-soft)] bg-white/70 px-3 py-1">分页大小 {settings.pageSize}</span>
-          <span className="rounded-full border border-[color:var(--border-soft)] bg-white/70 px-3 py-1">额度检查 {settings.includeQuota ? '已开启' : '已关闭'}</span>
+          <span className="rounded-full border border-[color:var(--border-soft)] bg-white/70 px-3 py-1">接口地址 {settings.baseUrl || '当前页面来源'}</span>
+          <span className="rounded-full border border-[color:var(--border-soft)] bg-white/70 px-3 py-1">分页数量 {settings.pageSize}</span>
+          <span className="rounded-full border border-[color:var(--border-soft)] bg-white/70 px-3 py-1">额度快照 {settings.includeQuota ? '已开启' : '已关闭'}</span>
         </div>
 
         {actionMessage ? (
@@ -393,7 +405,7 @@ export function DashboardPage({
                     <th className="px-4 py-4 font-medium">状态</th>
                     <th className="px-4 py-4 font-medium">请求数</th>
                     <th className="px-4 py-4 font-medium">错误数</th>
-                    <th className="px-4 py-4 font-medium">Token 数</th>
+                    <th className="px-4 py-4 font-medium">令牌用量</th>
                     <th className="px-4 py-4 font-medium">最近使用</th>
                     <th className="px-4 py-4 font-medium">最近刷新</th>
                     <th className="px-4 py-4 font-medium">额度</th>
@@ -422,9 +434,9 @@ export function DashboardPage({
         )}
       </Card>
 
-      <AccountDetailDrawer account={selectedAccount} open={Boolean(selectedAccount)} onClose={() => setSelectedAccountId(null)} />
+      <AccountDetailDrawer account={selectedAccount} open={Boolean(selectedAccount)} onClose={() => setSelectedAccountId(null)} onDeleteAccount={handleDeleteAccount} />
       <SettingsDialog open={settingsOpen} initialValue={settings} onSave={handleSaveSettings} onClose={() => setSettingsOpen(false)} />
-      <OAuthImportDialog open={oauthOpen} onClose={() => setOauthOpen(false)} onOAuthImport={handleImport} onManualImport={handleManualImport} />
+      <OAuthImportDialog open={oauthOpen} onClose={() => setOauthOpen(false)} onOAuthStart={handleOAuthStart} onOAuthPoll={handleOAuthPoll} onManualImport={handleManualImport} />
     </main>
   );
 }

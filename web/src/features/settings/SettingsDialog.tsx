@@ -48,12 +48,12 @@ export function SettingsDialog({ open, initialValue, onSave, onClose }: Settings
 
       <form className="grid gap-4" onSubmit={handleSubmit}>
         <label className="grid gap-2 text-sm font-medium text-[color:var(--text-secondary)]">
-          <span>API 基础地址</span>
+          <span>接口基础地址</span>
           <input className="console-field" value={formValue.baseUrl} onChange={(event) => update('baseUrl', event.target.value)} />
         </label>
 
         <label className="grid gap-2 text-sm font-medium text-[color:var(--text-secondary)]">
-          <span>管理 API Key</span>
+          <span>管理密钥</span>
           <input
             className="console-field"
             value={formValue.apiKey}
@@ -65,7 +65,7 @@ export function SettingsDialog({ open, initialValue, onSave, onClose }: Settings
 
         <div className="grid gap-4 md:grid-cols-2">
           <label className="grid gap-2 text-sm font-medium text-[color:var(--text-secondary)]">
-            <span>默认分页大小</span>
+          <span>默认分页数量</span>
             <input
               className="console-field"
               type="number"

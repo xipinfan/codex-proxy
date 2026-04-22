@@ -22,10 +22,10 @@ ENV TZ=Asia/Shanghai
 WORKDIR /app
 COPY --from=builder /codex-proxy /app/codex-proxy
 COPY config.example.yaml /app/config.example.yaml
+COPY docker/entrypoint.sh /app/entrypoint.sh
 
-RUN mkdir -p /app/auths
+RUN mkdir -p /app/auths && chmod +x /app/entrypoint.sh
 
 EXPOSE 8080
 
-ENTRYPOINT ["/app/codex-proxy"]
-CMD ["-config", "/app/config.yaml"]
+ENTRYPOINT ["/app/entrypoint.sh"]

@@ -5,14 +5,32 @@ import { Drawer } from '../../components/ui/Drawer';
 import { formatDateTime, formatNumber } from '../../lib/format';
 import type { AccountView } from '../../lib/types';
 import { QuotaPanel } from './QuotaPanel';
+import { useState } from 'react';
 
 interface AccountDetailDrawerProps {
   account: AccountView | null;
   open: boolean;
   onClose: () => void;
+  onDeleteAccount?: (account: AccountView) => Promise<void>;
 }
 
-export function AccountDetailDrawer({ account, open, onClose }: AccountDetailDrawerProps) {
+export function AccountDetailDrawer({ account, open, onClose, onDeleteAccount }: AccountDetailDrawerProps) {
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+
+  async function handleDelete() {
+    if (!account || !onDeleteAccount) {
+      return;
+    }
+    setDeleting(true);
+    try {
+      await onDeleteAccount(account);
+      setConfirmDelete(false);
+    } finally {
+      setDeleting(false);
+    }
+  }
+
   return (
     <Drawer open={open} onClose={onClose} title={account ? `${account.email} 详情` : '账号详情'}>
       {account ? (
@@ -34,7 +52,7 @@ export function AccountDetailDrawer({ account, open, onClose }: AccountDetailDra
           </div>
 
           <Card className="rounded-[24px] bg-white/72 shadow-none">
-            <p className="text-xs uppercase tracking-[0.22em] text-[color:var(--text-secondary)]">用量概览</p>
+            <p className="text-xs font-semibold tracking-[0.22em] text-[color:var(--text-secondary)]">用量概览</p>
             <div className="mt-4 grid gap-3 sm:grid-cols-3">
               <div>
                 <p className="text-xs text-[color:var(--text-secondary)]">完成次数</p>
@@ -50,7 +68,7 @@ export function AccountDetailDrawer({ account, open, onClose }: AccountDetailDra
               </div>
             </div>
             <div className="mt-4 rounded-[22px] bg-[rgba(32,25,22,0.04)] px-4 py-3">
-              <p className="text-xs uppercase tracking-[0.18em] text-[color:var(--text-secondary)]">总 Tokens</p>
+              <p className="text-xs font-semibold tracking-[0.18em] text-[color:var(--text-secondary)]">令牌总量</p>
               <p className="mt-1 text-2xl font-semibold">{formatNumber(account.usage.totalTokens)}</p>
             </div>
           </Card>
@@ -58,7 +76,7 @@ export function AccountDetailDrawer({ account, open, onClose }: AccountDetailDra
           <QuotaPanel account={account} />
 
           <Card className="rounded-[24px] bg-white/72 shadow-none">
-            <p className="text-xs uppercase tracking-[0.22em] text-[color:var(--text-secondary)]">健康指标</p>
+            <p className="text-xs font-semibold tracking-[0.22em] text-[color:var(--text-secondary)]">健康指标</p>
             <div className="mt-4 grid gap-4 text-sm text-[color:var(--text-secondary)]">
               <div className="flex items-center justify-between">
                 <span>请求数 / 错误数</span>
@@ -77,10 +95,29 @@ export function AccountDetailDrawer({ account, open, onClose }: AccountDetailDra
                 <span className="font-medium text-[color:var(--text-primary)]">{formatDateTime(account.lastUsedAt)}</span>
               </div>
               <div className="rounded-[20px] border border-[color:var(--border-soft)] bg-[rgba(255,255,255,0.76)] px-4 py-3">
-                <p className="text-xs uppercase tracking-[0.18em]">停用原因</p>
+                <p className="text-xs font-semibold tracking-[0.18em]">停用原因</p>
                 <p className="mt-1 text-sm text-[color:var(--text-primary)]">{account.disableReason || '未报告停用原因'}</p>
               </div>
             </div>
+          </Card>
+
+          <Card className="rounded-[24px] border border-[rgba(207,94,72,0.22)] bg-[rgba(255,247,244,0.88)] shadow-none">
+            <p className="text-xs font-semibold tracking-[0.22em] text-[#8f2e1f]">危险操作</p>
+            <p className="mt-2 text-sm text-[color:var(--text-secondary)]">删除后会从账号池移除，并清理对应存储记录。</p>
+            {confirmDelete ? (
+              <div className="mt-3 flex items-center gap-3">
+                <Button variant="secondary" onClick={() => setConfirmDelete(false)}>
+                  取消
+                </Button>
+                <Button disabled={deleting} onClick={() => void handleDelete()}>
+                  {deleting ? '删除中...' : '确认删除此账号'}
+                </Button>
+              </div>
+            ) : (
+              <div className="mt-3">
+                <Button onClick={() => setConfirmDelete(true)}>删除此账号</Button>
+              </div>
+            )}
           </Card>
         </div>
       ) : null}

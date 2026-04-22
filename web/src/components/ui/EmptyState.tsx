@@ -14,7 +14,7 @@ export function EmptyState({ onImport }: EmptyStateProps) {
       <div className="max-w-xl space-y-3">
         <h2 className="text-3xl font-semibold tracking-[-0.03em]">导入你的第一个 Codex 账号</h2>
         <p className="text-base leading-7 text-[color:var(--text-secondary)]">
-          当前账号池还是空的。你可以通过 OAuth 回调 URL 或直接填写 token 字段导入账号，随后就能在这里查看健康度、额度与错误状态。
+          当前账号池还是空的。你可以通过授权回调地址或直接填写令牌字段导入账号，随后就能在这里查看健康度、额度与错误状态。
         </p>
       </div>
       {onImport ? <Button onClick={onImport}>打开导入流程</Button> : null}

@@ -166,6 +166,29 @@ export interface IngestResult {
   failed: number;
   pool_total: number;
   errors?: string[];
+  validation?: {
+    email?: string;
+    account_id?: string;
+    success: boolean;
+    message?: string;
+  };
+}
+
+export interface OAuthStartResponse {
+  authorize_url: string;
+  state: string;
+  expires_in: number;
+}
+
+export interface OAuthPollResponse {
+  status: 'pending' | 'completed' | 'failed';
+  message?: string;
+  result?: IngestResult;
+}
+
+export interface AccountDeletePayload {
+  email?: string;
+  file_path?: string;
 }
 
 export interface ProgressEvent {

@@ -6,11 +6,11 @@ const dateTimeFormatter = new Intl.DateTimeFormat('zh-CN', {
 });
 
 export function formatNumber(value: number): string {
-  return new Intl.NumberFormat('en-US').format(value);
+  return new Intl.NumberFormat('zh-CN').format(value);
 }
 
 export function formatCompactNumber(value: number): string {
-  return new Intl.NumberFormat('en-US', {
+  return new Intl.NumberFormat('zh-CN', {
     notation: 'compact',
     maximumFractionDigits: value >= 100 ? 0 : 1,
   }).format(value);
@@ -40,7 +40,7 @@ export function formatStatusLabel(status: string): string {
     return '已停用';
   }
 
-  return status || '未知';
+  return status ? `未知状态：${status}` : '未知';
 }
 
 export function formatPercent(value: number | null): string {

@@ -5,32 +5,49 @@ import { describe, expect, it, vi } from 'vitest';
 import { OAuthImportDialog } from '../features/oauth-import/OAuthImportDialog';
 
 describe('OAuthImportDialog', () => {
-  it('passes the callback url to the import handler', async () => {
+  it('polls the backend after opening the oauth page and shows the final result', async () => {
     const user = userEvent.setup();
-    const onOAuthImport = vi.fn().mockResolvedValue(undefined);
+    const openSpy = vi.spyOn(window, 'open').mockImplementation(() => null);
+    const onOAuthStart = vi.fn().mockResolvedValue({
+      authorize_url: 'https://auth.openai.com/oauth/authorize?state=abc',
+      state: 'oauth-state',
+      expires_in: 300,
+    });
+    const onOAuthPoll = vi
+      .fn()
+      .mockResolvedValueOnce({ status: 'pending' })
+      .mockResolvedValueOnce({
+        status: 'completed',
+        result: {
+          added: 1,
+          updated: 0,
+          failed: 0,
+          pool_total: 1,
+        },
+      });
     const onManualImport = vi.fn().mockResolvedValue(undefined);
 
-    render(<OAuthImportDialog open onClose={() => {}} onOAuthImport={onOAuthImport} onManualImport={onManualImport} />);
-
-    await user.type(
-      screen.getByLabelText(/回调 URL/i),
-      'http://127.0.0.1:1455/callback#access_token=at&id_token=it&refresh_token=rt',
-    );
-    await user.click(screen.getByRole('button', { name: /解析并导入/i }));
+    render(<OAuthImportDialog open onClose={() => {}} onOAuthStart={onOAuthStart} onOAuthPoll={onOAuthPoll} onManualImport={onManualImport} />);
+    await user.click(screen.getByRole('button', { name: /打开 OpenAI 授权页/i }));
 
     await waitFor(() => {
-      expect(onOAuthImport).toHaveBeenCalledWith(
-        'http://127.0.0.1:1455/callback#access_token=at&id_token=it&refresh_token=rt',
-      );
+      expect(onOAuthPoll).toHaveBeenCalledWith('oauth-state');
     });
+    expect(openSpy).toHaveBeenCalledWith('https://auth.openai.com/oauth/authorize?state=abc', '_blank', 'noopener,noreferrer');
+    expect(await screen.findByText(/已成功导入 1 个账号/i)).toBeInTheDocument();
+    openSpy.mockRestore();
   });
 
   it('submits a manual token payload from direct fields', async () => {
     const user = userEvent.setup();
-    const onOAuthImport = vi.fn().mockResolvedValue(undefined);
+    const onOAuthStart = vi.fn().mockResolvedValue({
+      authorize_url: 'https://auth.openai.com/oauth/authorize?state=abc',
+      state: 'oauth-state',
+      expires_in: 300,
+    });
     const onManualImport = vi.fn().mockResolvedValue(undefined);
 
-    render(<OAuthImportDialog open onClose={() => {}} onOAuthImport={onOAuthImport} onManualImport={onManualImport} />);
+    render(<OAuthImportDialog open onClose={() => {}} onOAuthStart={onOAuthStart} onOAuthPoll={vi.fn()} onManualImport={onManualImport} />);
 
     await user.click(screen.getByRole('button', { name: /字段直填导入/i }));
     await user.clear(screen.getByLabelText(/type（账号类型）/i));
@@ -53,24 +70,33 @@ describe('OAuthImportDialog', () => {
     });
   });
 
-  it('shows a validation hint when the callback url is empty', async () => {
-    const user = userEvent.setup();
-
-    render(<OAuthImportDialog open onClose={() => {}} onOAuthImport={vi.fn()} onManualImport={vi.fn()} />);
-
-    await user.click(screen.getByRole('button', { name: /解析并导入/i }));
-
-    expect(screen.getByText(/请粘贴完整回调 URL/i)).toBeInTheDocument();
-  });
-
   it('shows a validation hint when manual token fields are empty', async () => {
     const user = userEvent.setup();
 
-    render(<OAuthImportDialog open onClose={() => {}} onOAuthImport={vi.fn()} onManualImport={vi.fn()} />);
+    render(<OAuthImportDialog open onClose={() => {}} onOAuthStart={vi.fn()} onOAuthPoll={vi.fn()} onManualImport={vi.fn()} />);
 
     await user.click(screen.getByRole('button', { name: /字段直填导入/i }));
     await user.click(screen.getByRole('button', { name: /直接导入账号/i }));
 
-    expect(screen.getAllByText(/至少填写 access_token、refresh_token 或 id_token 中的一项/i)).toHaveLength(2);
+    expect(screen.getByText(/至少填写 access_token、refresh_token 或 id_token 中的一项/i)).toBeInTheDocument();
+  });
+
+  it('requests backend pkce url before opening oauth page', async () => {
+    const user = userEvent.setup();
+    const openSpy = vi.spyOn(window, 'open').mockImplementation(() => null);
+    const onOAuthStart = vi.fn().mockResolvedValue({
+      authorize_url: 'https://auth.openai.com/oauth/authorize?state=abc',
+      state: 'oauth-state',
+      expires_in: 300,
+    });
+
+    render(<OAuthImportDialog open onClose={() => {}} onOAuthStart={onOAuthStart} onOAuthPoll={vi.fn().mockResolvedValue({ status: 'pending' })} onManualImport={vi.fn()} />);
+    await user.click(screen.getByRole('button', { name: /打开 OpenAI 授权页/i }));
+
+    await waitFor(() => {
+      expect(onOAuthStart).toHaveBeenCalledTimes(1);
+      expect(openSpy).toHaveBeenCalledWith('https://auth.openai.com/oauth/authorize?state=abc', '_blank', 'noopener,noreferrer');
+    });
+    openSpy.mockRestore();
   });
 });

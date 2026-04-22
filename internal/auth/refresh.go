@@ -163,8 +163,8 @@ func (r *Refresher) RefreshToken(ctx context.Context, refreshToken string) (*Tok
 	if resp.StatusCode != http.StatusOK {
 		/* 截断响应体，避免日志刷屏 */
 		msg := string(body)
-		if len(msg) > 150 {
-			msg = msg[:150] + "..."
+		if len(msg) > 200 {
+			msg = msg[:200] + "..."
 		}
 		return nil, &RefreshError{StatusCode: resp.StatusCode, Msg: msg}
 	}

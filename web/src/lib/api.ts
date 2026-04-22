@@ -1,7 +1,10 @@
 import type {
+  AccountDeletePayload,
   ApiErrorShape,
   ConsoleSettings,
   IngestResult,
+  OAuthPollResponse,
+  OAuthStartResponse,
   ProgressEvent,
   StatsQuery,
   StatsResponse,
@@ -37,6 +40,37 @@ export async function ingestAccounts(
   payload: TokenFilePayload[],
 ): Promise<IngestResult> {
   return requestJSON<IngestResult>(settings, '/admin/accounts/ingest', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function startCodexOAuth(settings: ConsoleSettings): Promise<OAuthStartResponse> {
+  return requestJSON<OAuthStartResponse>(settings, '/oauth/codex/start', {
+    method: 'POST',
+  });
+}
+
+export async function pollCodexOAuth(settings: ConsoleSettings, state: string): Promise<OAuthPollResponse> {
+  const search = new URLSearchParams({ state });
+  return requestJSON<OAuthPollResponse>(settings, `/oauth/codex/result?${search.toString()}`);
+}
+
+export async function completeCodexOAuth(settings: ConsoleSettings, callbackUrl: string): Promise<IngestResult> {
+  return requestJSON<IngestResult>(settings, '/oauth/codex/complete', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ callback_url: callbackUrl }),
+  });
+}
+
+export async function deleteAccount(settings: ConsoleSettings, payload: AccountDeletePayload): Promise<void> {
+  await requestJSON(settings, '/admin/accounts/delete', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
