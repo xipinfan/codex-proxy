@@ -4,6 +4,7 @@ import { Button } from '../../components/ui/Button';
 import { Card } from '../../components/ui/Card';
 import { EmptyState } from '../../components/ui/EmptyState';
 import { ErrorState } from '../../components/ui/ErrorState';
+import { Toast } from '../../components/ui/Toast';
 import { AccountDetailDrawer } from '../account-detail/AccountDetailDrawer';
 import { OAuthImportDialog } from '../oauth-import/OAuthImportDialog';
 import { SettingsDialog } from '../settings/SettingsDialog';
@@ -174,6 +175,18 @@ export function DashboardPage({
     }
   }, [selectedAccountId, stats.accounts]);
 
+  useEffect(() => {
+    if (!actionMessage || actionMessage.tone === 'error') {
+      return undefined;
+    }
+
+    const timeout = window.setTimeout(() => {
+      setActionMessage((current) => (current === actionMessage ? null : current));
+    }, 3200);
+
+    return () => window.clearTimeout(timeout);
+  }, [actionMessage]);
+
   async function handleRefresh() {
     await loadStats(buildQuery(page, settings, query));
   }
@@ -280,6 +293,8 @@ export function DashboardPage({
 
   return (
     <main className="mx-auto flex min-h-screen w-full max-w-[1480px] flex-col gap-6 px-4 py-5 sm:px-6 sm:py-8 lg:px-10">
+      {actionMessage ? <Toast tone={actionMessage.tone} text={actionMessage.text} onClose={() => setActionMessage(null)} /> : null}
+
       <header className="rounded-[32px] border border-white/50 bg-[color:var(--bg-surface)] p-6 shadow-[var(--shadow-soft)] backdrop-blur-xl">
         <div className="flex flex-col gap-6 lg:flex-row lg:items-end lg:justify-between">
           <div className="space-y-4">
@@ -328,23 +343,6 @@ export function DashboardPage({
           <span className="rounded-full border border-[color:var(--border-soft)] bg-white/70 px-3 py-1">分页数量 {settings.pageSize}</span>
           <span className="rounded-full border border-[color:var(--border-soft)] bg-white/70 px-3 py-1">额度快照 {settings.includeQuota ? '已开启' : '已关闭'}</span>
         </div>
-
-        {actionMessage ? (
-          <div
-            className={`mt-6 flex items-center justify-between gap-3 rounded-[22px] px-4 py-3 text-sm ${
-              actionMessage.tone === 'success'
-                ? 'bg-[rgba(59,184,197,0.14)] text-[#14626b]'
-                : actionMessage.tone === 'error'
-                  ? 'bg-[rgba(207,94,72,0.12)] text-[#8f2e1f]'
-                  : 'bg-white/70 text-[color:var(--text-primary)]'
-            }`}
-          >
-            <span>{actionMessage.text}</span>
-            <Button variant="ghost" onClick={() => setActionMessage(null)}>
-              关闭提示
-            </Button>
-          </div>
-        ) : null}
 
         {streamAction ? (
           <div className="mt-4 rounded-[22px] bg-white/70 px-4 py-3 text-sm text-[color:var(--text-primary)]">

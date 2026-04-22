@@ -9,6 +9,23 @@ const sampleAccount = {
   email: 'a@example.com',
   status: 'active',
   planType: 'plus',
+  quota: {
+    valid: true,
+    statusCode: 200,
+    checkedAt: '2026-04-21T12:30:00Z',
+    rawData: {
+      rate_limit: {
+        primary_window: {
+          used_percent: 23,
+          limit_window_seconds: 18000,
+        },
+        secondary_window: {
+          used_percent: 4,
+          limit_window_seconds: 604800,
+        },
+      },
+    },
+  },
   usage: {
     totalCompletions: 12,
     inputTokens: 200,
@@ -66,6 +83,27 @@ describe('AccountsTable', () => {
     expect(row.tagName).toBe('TR');
     expect(row).toHaveAttribute('data-selected', 'true');
     expect(screen.getAllByRole('cell')).toHaveLength(8);
+  });
+
+  it('renders compact quota progress bars for 5h and 7d windows', () => {
+    render(
+      <table>
+        <tbody>
+          <AccountsTable
+            accounts={[sampleAccount]}
+            selectedAccountId=""
+            onSelect={vi.fn()}
+          />
+        </tbody>
+      </table>,
+    );
+
+    expect(screen.getByText('5h')).toBeInTheDocument();
+    expect(screen.getByText('7d')).toBeInTheDocument();
+    expect(screen.getByText('77%')).toBeInTheDocument();
+    expect(screen.getByText('96%')).toBeInTheDocument();
+    expect(screen.getByRole('progressbar', { name: /5h 可用额度/i })).toHaveAttribute('aria-valuenow', '77');
+    expect(screen.getByRole('progressbar', { name: /7d 可用额度/i })).toHaveAttribute('aria-valuenow', '96');
   });
 
   it('notifies when a row is clicked', async () => {

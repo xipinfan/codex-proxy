@@ -24,6 +24,7 @@ CLIProxyAPIPlus/
 *~
 .worktrees/
 .superpowers/
+.run-logs/
 web/node_modules/
 web/*.tsbuildinfo
 web/vite.config.js

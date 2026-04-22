@@ -10,8 +10,12 @@ describe('AccountDetailDrawer', () => {
     render(<AccountDetailDrawer account={sampleAccount} open onClose={() => {}} />);
 
     expect(screen.getByText(/额度窗口/i)).toBeInTheDocument();
-    expect(screen.getByText(/重置时间/i)).toBeInTheDocument();
-    expect(screen.getByText(/5,000/i)).toBeInTheDocument();
+    expect(screen.getByText(/5 小时额度/i)).toBeInTheDocument();
+    expect(screen.getByText(/7 日额度/i)).toBeInTheDocument();
+    expect(screen.getByText(/78%/i)).toBeInTheDocument();
+    expect(screen.getByText(/97%/i)).toBeInTheDocument();
+    expect(screen.getByText(/历史令牌消耗/i)).toBeInTheDocument();
+    expect(screen.getAllByText(/5,000/i)).toHaveLength(2);
   });
 
   it('renders fallback when quota data is missing', () => {

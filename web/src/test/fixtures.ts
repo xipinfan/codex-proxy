@@ -5,10 +5,20 @@ export const sampleQuota: QuotaView = {
   statusCode: 200,
   checkedAt: '2026-04-21T12:30:00Z',
   rawData: {
-    limit: 100,
-    used: 64,
-    used_percent: 64,
-    resets_at: '2026-04-22T00:00:00Z',
+    rate_limit: {
+      allowed: true,
+      limit_reached: false,
+      primary_window: {
+        used_percent: 22,
+        limit_window_seconds: 18000,
+        reset_at: 1776886455,
+      },
+      secondary_window: {
+        used_percent: 3,
+        limit_window_seconds: 604800,
+        reset_at: 1777473255,
+      },
+    },
   },
 };
 

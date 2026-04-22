@@ -1,34 +1,11 @@
-import { formatDateTime, formatPercent } from '../../lib/format';
+import { formatDateTime, formatNumber, formatPercent } from '../../lib/format';
+import { parseQuotaDetails } from '../../lib/quota';
 import type { AccountView } from '../../lib/types';
 
-function asNumber(input: unknown): number | null {
-  if (typeof input === 'number' && Number.isFinite(input)) {
-    return input;
-  }
-
-  if (typeof input === 'string' && input.trim()) {
-    const value = Number(input);
-    return Number.isFinite(value) ? value : null;
-  }
-
-  return null;
-}
-
 function deriveQuotaPercent(account: AccountView): number | null {
-  const rawData = account.quota?.rawData;
-
-  if (rawData && typeof rawData === 'object' && !Array.isArray(rawData)) {
-    const record = rawData as Record<string, unknown>;
-    const direct = asNumber(record.used_percent ?? record.usedPercent ?? record.usage_percent ?? record.usagePercent);
-    if (direct !== null) {
-      return Math.max(0, Math.min(100, direct));
-    }
-
-    const used = asNumber(record.used ?? record.current_usage ?? record.currentUsage);
-    const limit = asNumber(record.limit ?? record.max ?? record.total ?? record.quota);
-    if (used !== null && limit !== null && limit > 0) {
-      return Math.max(0, Math.min(100, (used / limit) * 100));
-    }
+  const primaryWindow = parseQuotaDetails(account.quota?.rawData).primaryWindow;
+  if (primaryWindow) {
+    return primaryWindow.usedPercent;
   }
 
   if (account.quotaExhausted) {
@@ -50,6 +27,7 @@ export function QuotaPanel({ account }: { account: AccountView }) {
   }
 
   const usedPercent = deriveQuotaPercent(account);
+  const details = parseQuotaDetails(account.quota.rawData);
 
   return (
     <section className="relative overflow-hidden rounded-[26px] border border-[color:var(--border-soft)] bg-[rgba(255,250,245,0.82)] p-5 shadow-[inset_0_1px_0_rgba(255,255,255,0.72)]">
@@ -67,10 +45,30 @@ export function QuotaPanel({ account }: { account: AccountView }) {
           style={{ width: `${usedPercent ?? 12}%` }}
         />
       </div>
+      {details.windows.length > 0 ? (
+        <div className="relative mt-4 grid gap-3 text-sm text-[color:var(--text-secondary)]">
+          {details.windows.map((window) => (
+            <div key={window.label} className="rounded-[20px] bg-white/62 px-4 py-3">
+              <div className="flex items-center justify-between gap-3">
+                <p className="text-xs font-semibold tracking-[0.16em]">{window.label}</p>
+                <span className="font-semibold text-[color:var(--text-primary)]">可用 {formatPercent(window.availablePercent)}</span>
+              </div>
+              <div className="mt-3 h-2 overflow-hidden rounded-full bg-[rgba(59,184,197,0.12)]">
+                <div className="h-full rounded-full bg-gradient-to-r from-[#3bb8c5] to-[#f39239]" style={{ width: `${window.usedPercent}%` }} />
+              </div>
+              <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
+                <span>已用 {formatPercent(window.usedPercent)}</span>
+                <span>重置 {formatDateTime(window.resetAt)}</span>
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : null}
+
       <div className="relative mt-4 grid gap-3 text-sm text-[color:var(--text-secondary)] sm:grid-cols-2">
         <div className="rounded-[20px] bg-white/62 px-4 py-3">
-          <p className="text-xs font-semibold tracking-[0.16em]">重置时间</p>
-          <p className="mt-1 font-medium text-[color:var(--text-primary)]">{formatDateTime(account.quotaResetsAt)}</p>
+          <p className="text-xs font-semibold tracking-[0.16em]">历史令牌消耗</p>
+          <p className="mt-1 font-medium text-[color:var(--text-primary)]">{formatNumber(account.usage.totalTokens)}</p>
         </div>
         <div className="rounded-[20px] bg-white/62 px-4 py-3">
           <p className="text-xs font-semibold tracking-[0.16em]">最近检查</p>
