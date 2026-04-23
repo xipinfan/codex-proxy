@@ -10,6 +10,7 @@ interface OAuthImportDialogProps {
   onClose: () => void;
   onOAuthStart: () => Promise<OAuthStartResponse>;
   onOAuthPoll: (state: string) => Promise<OAuthPollResponse>;
+  onOAuthComplete: (callbackUrl: string) => Promise<IngestResult>;
   onManualImport: (payload: TokenFilePayload) => Promise<IngestResult | void>;
 }
 
@@ -36,9 +37,10 @@ function buildSuccessMessage(result: IngestResult | void): string {
   return validationText ? `${main} ${validationText}` : main;
 }
 
-export function OAuthImportDialog({ open, onClose, onOAuthStart, onOAuthPoll, onManualImport }: OAuthImportDialogProps) {
+export function OAuthImportDialog({ open, onClose, onOAuthStart, onOAuthPoll, onOAuthComplete, onManualImport }: OAuthImportDialogProps) {
   const [mode, setMode] = useState<ImportMode>('oauth');
   const [manualForm, setManualForm] = useState<TokenFilePayload>(initialManualForm);
+  const [callbackUrl, setCallbackUrl] = useState('');
   const [errorMessage, setErrorMessage] = useState('');
   const [successMessage, setSuccessMessage] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -49,6 +51,7 @@ export function OAuthImportDialog({ open, onClose, onOAuthStart, onOAuthPoll, on
     if (open) {
       setMode('oauth');
       setManualForm(initialManualForm);
+      setCallbackUrl('');
       setErrorMessage('');
       setSuccessMessage('');
       setOauthState(null);
@@ -72,6 +75,8 @@ export function OAuthImportDialog({ open, onClose, onOAuthStart, onOAuthPoll, on
       await waitForOAuthResult(started.state, started.expires_in);
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : '拉起授权页失败。');
+      setOauthState(null);
+      setIsSubmitting(false);
     } finally {
       setIsOpeningAuth(false);
     }
@@ -95,6 +100,29 @@ export function OAuthImportDialog({ open, onClose, onOAuthStart, onOAuthPoll, on
       await new Promise((resolve) => window.setTimeout(resolve, 600));
     }
     throw new Error('等待授权回调超时，请重新打开授权页。');
+  }
+
+  async function handleCallbackSubmit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const trimmed = callbackUrl.trim();
+    if (!trimmed) {
+      setErrorMessage('请先粘贴完整的回调 URL。');
+      setSuccessMessage('');
+      return;
+    }
+
+    setErrorMessage('');
+    setSuccessMessage('');
+    setIsSubmitting(true);
+    try {
+      const result = await onOAuthComplete(trimmed);
+      setSuccessMessage(buildSuccessMessage(result));
+      setOauthState(null);
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : '提交回调 URL 失败。');
+    } finally {
+      setIsSubmitting(false);
+    }
   }
 
   async function handleManualSubmit(event: React.FormEvent<HTMLFormElement>) {
@@ -151,8 +179,8 @@ export function OAuthImportDialog({ open, onClose, onOAuthStart, onOAuthPoll, on
             <p className="text-xs font-semibold tracking-[0.18em] text-[color:var(--text-secondary)]">授权导入流程</p>
             <ol className="mt-3 grid gap-3 text-sm leading-6 text-[color:var(--text-secondary)]">
               <li>1. 打开 OpenAI 授权页并完成登录。</li>
-              <li>2. 浏览器会跳回本机 <code>localhost:1455</code> 回调监听。</li>
-              <li>3. 控制台自动拿到授权 code，换取令牌并导入到当前账号池。</li>
+              <li>2. 浏览器跳回 <code>localhost:1455/auth/callback</code> 后，如果自动导入失败，请复制地址栏完整 URL。</li>
+              <li>3. 将完整回调 URL 粘贴到下方并提交，系统会手动完成换 token 并导入。</li>
             </ol>
           </div>
 
@@ -165,9 +193,26 @@ export function OAuthImportDialog({ open, onClose, onOAuthStart, onOAuthPoll, on
 
           {oauthState ? (
             <p className="rounded-[20px] bg-white/70 px-4 py-3 text-sm text-[color:var(--text-secondary)]">
-              正在等待 state <code>{oauthState.slice(0, 8)}</code> 的回调结果，请在新打开的授权页完成登录。
+              正在等待 state <code>{oauthState.slice(0, 8)}</code> 的回调结果。若页面停在 localhost 报错，可直接复制地址栏 URL 到下方手动提交。
             </p>
           ) : null}
+
+          <form className="grid gap-3 rounded-[24px] border border-[color:var(--border-soft)] bg-white/75 p-4" onSubmit={handleCallbackSubmit}>
+            <label className="grid gap-2 text-sm font-medium text-[color:var(--text-secondary)]">
+              <span>回调 URL（完整粘贴 <code>http://localhost:1455/auth/callback?code=...&state=...</code>）</span>
+              <textarea
+                className="min-h-[96px] rounded-[20px] border border-[color:var(--border-soft)] bg-white/80 px-4 py-3 outline-none"
+                value={callbackUrl}
+                onChange={(event) => setCallbackUrl(event.target.value)}
+                placeholder="粘贴浏览器地址栏完整回调 URL"
+              />
+            </label>
+            <div className="flex items-center justify-end gap-3">
+              <Button type="submit" disabled={isSubmitting}>
+                {isSubmitting ? '提交中...' : '已完成授权，提交回调 URL'}
+              </Button>
+            </div>
+          </form>
 
           {errorMessage ? <p className="rounded-[20px] bg-[rgba(207,94,72,0.12)] px-4 py-3 text-sm text-[#8f2e1f]">{errorMessage}</p> : null}
           {successMessage ? <p className="rounded-[20px] bg-[rgba(59,184,197,0.14)] px-4 py-3 text-sm text-[#14626b]">{successMessage}</p> : null}

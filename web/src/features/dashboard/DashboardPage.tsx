@@ -10,7 +10,7 @@ import { OAuthImportDialog } from '../oauth-import/OAuthImportDialog';
 import { SettingsDialog } from '../settings/SettingsDialog';
 import { AccountsTable } from './AccountsTable';
 import { StatsOverview } from './StatsOverview';
-import { deleteAccount, fetchStats, ingestAccounts, pollCodexOAuth, runProgressAction, startCodexOAuth } from '../../lib/api';
+import { completeCodexOAuth, deleteAccount, fetchStats, ingestAccounts, pollCodexOAuth, runProgressAction, startCodexOAuth } from '../../lib/api';
 import { formatCompactNumber } from '../../lib/format';
 import { loadConsoleSettings, saveConsoleSettings } from '../../lib/storage';
 import { adaptStatsResponse } from '../../lib/stats';
@@ -270,6 +270,20 @@ export function DashboardPage({
     return result;
   }
 
+  async function handleOAuthComplete(callbackUrl: string): Promise<IngestResult> {
+    const result = await completeCodexOAuth(settings, callbackUrl);
+    setActionMessage({
+      tone: result.failed > 0 ? 'error' : 'success',
+      text:
+        result.failed > 0
+          ? `已导入 ${result.added + result.updated} 个账号，失败 ${result.failed} 个。`
+          : `已成功导入 ${result.added + result.updated} 个账号。`,
+    });
+    setPage(1);
+    await loadStats(buildQuery(1, settings, query));
+    return result;
+  }
+
   async function handleManualImport(payload: TokenFilePayload): Promise<IngestResult> {
     const result = await ingestAccounts(settings, [payload]);
     setActionMessage({
@@ -434,7 +448,14 @@ export function DashboardPage({
 
       <AccountDetailDrawer account={selectedAccount} open={Boolean(selectedAccount)} onClose={() => setSelectedAccountId(null)} onDeleteAccount={handleDeleteAccount} />
       <SettingsDialog open={settingsOpen} initialValue={settings} onSave={handleSaveSettings} onClose={() => setSettingsOpen(false)} />
-      <OAuthImportDialog open={oauthOpen} onClose={() => setOauthOpen(false)} onOAuthStart={handleOAuthStart} onOAuthPoll={handleOAuthPoll} onManualImport={handleManualImport} />
+      <OAuthImportDialog
+        open={oauthOpen}
+        onClose={() => setOauthOpen(false)}
+        onOAuthStart={handleOAuthStart}
+        onOAuthPoll={handleOAuthPoll}
+        onOAuthComplete={handleOAuthComplete}
+        onManualImport={handleManualImport}
+      />
     </main>
   );
 }

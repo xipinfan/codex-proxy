@@ -26,8 +26,23 @@ describe('OAuthImportDialog', () => {
         },
       });
     const onManualImport = vi.fn().mockResolvedValue(undefined);
+    const onOAuthComplete = vi.fn().mockResolvedValue({
+      added: 0,
+      updated: 0,
+      failed: 0,
+      pool_total: 0,
+    });
 
-    render(<OAuthImportDialog open onClose={() => {}} onOAuthStart={onOAuthStart} onOAuthPoll={onOAuthPoll} onManualImport={onManualImport} />);
+    render(
+      <OAuthImportDialog
+        open
+        onClose={() => {}}
+        onOAuthStart={onOAuthStart}
+        onOAuthPoll={onOAuthPoll}
+        onOAuthComplete={onOAuthComplete}
+        onManualImport={onManualImport}
+      />,
+    );
     await user.click(screen.getByRole('button', { name: /打开 OpenAI 授权页/i }));
 
     await waitFor(() => {
@@ -46,8 +61,23 @@ describe('OAuthImportDialog', () => {
       expires_in: 300,
     });
     const onManualImport = vi.fn().mockResolvedValue(undefined);
+    const onOAuthComplete = vi.fn().mockResolvedValue({
+      added: 0,
+      updated: 0,
+      failed: 0,
+      pool_total: 0,
+    });
 
-    render(<OAuthImportDialog open onClose={() => {}} onOAuthStart={onOAuthStart} onOAuthPoll={vi.fn()} onManualImport={onManualImport} />);
+    render(
+      <OAuthImportDialog
+        open
+        onClose={() => {}}
+        onOAuthStart={onOAuthStart}
+        onOAuthPoll={vi.fn()}
+        onOAuthComplete={onOAuthComplete}
+        onManualImport={onManualImport}
+      />,
+    );
 
     await user.click(screen.getByRole('button', { name: /字段直填导入/i }));
     await user.clear(screen.getByLabelText(/type（账号类型）/i));
@@ -73,7 +103,16 @@ describe('OAuthImportDialog', () => {
   it('shows a validation hint when manual token fields are empty', async () => {
     const user = userEvent.setup();
 
-    render(<OAuthImportDialog open onClose={() => {}} onOAuthStart={vi.fn()} onOAuthPoll={vi.fn()} onManualImport={vi.fn()} />);
+    render(
+      <OAuthImportDialog
+        open
+        onClose={() => {}}
+        onOAuthStart={vi.fn()}
+        onOAuthPoll={vi.fn()}
+        onOAuthComplete={vi.fn()}
+        onManualImport={vi.fn()}
+      />,
+    );
 
     await user.click(screen.getByRole('button', { name: /字段直填导入/i }));
     await user.click(screen.getByRole('button', { name: /直接导入账号/i }));
@@ -90,7 +129,16 @@ describe('OAuthImportDialog', () => {
       expires_in: 300,
     });
 
-    render(<OAuthImportDialog open onClose={() => {}} onOAuthStart={onOAuthStart} onOAuthPoll={vi.fn().mockResolvedValue({ status: 'pending' })} onManualImport={vi.fn()} />);
+    render(
+      <OAuthImportDialog
+        open
+        onClose={() => {}}
+        onOAuthStart={onOAuthStart}
+        onOAuthPoll={vi.fn().mockResolvedValue({ status: 'pending' })}
+        onOAuthComplete={vi.fn()}
+        onManualImport={vi.fn()}
+      />,
+    );
     await user.click(screen.getByRole('button', { name: /打开 OpenAI 授权页/i }));
 
     await waitFor(() => {
@@ -98,5 +146,37 @@ describe('OAuthImportDialog', () => {
       expect(openSpy).toHaveBeenCalledWith('https://auth.openai.com/oauth/authorize?state=abc', '_blank', 'noopener,noreferrer');
     });
     openSpy.mockRestore();
+  });
+
+  it('submits callback url to complete oauth manually', async () => {
+    const user = userEvent.setup();
+    const onOAuthComplete = vi.fn().mockResolvedValue({
+      added: 1,
+      updated: 0,
+      failed: 0,
+      pool_total: 1,
+    });
+
+    render(
+      <OAuthImportDialog
+        open
+        onClose={() => {}}
+        onOAuthStart={vi.fn()}
+        onOAuthPoll={vi.fn()}
+        onOAuthComplete={onOAuthComplete}
+        onManualImport={vi.fn()}
+      />,
+    );
+
+    await user.type(
+      screen.getByLabelText(/回调 URL/i),
+      'http://localhost:1455/auth/callback?code=demo&state=oauth-state',
+    );
+    await user.click(screen.getByRole('button', { name: /提交回调 URL/i }));
+
+    await waitFor(() => {
+      expect(onOAuthComplete).toHaveBeenCalledWith('http://localhost:1455/auth/callback?code=demo&state=oauth-state');
+    });
+    expect(await screen.findByText(/已成功导入 1 个账号/i)).toBeInTheDocument();
   });
 });
