@@ -2,7 +2,7 @@ import clsx from 'clsx';
 import type { KeyboardEvent } from 'react';
 
 import { Badge } from '../../components/ui/Badge';
-import { formatDateTime, formatNumber, formatPercent } from '../../lib/format';
+import { formatDateTime, formatNumber, formatPercent, formatTokenCompact } from '../../lib/format';
 import { parseQuotaDetails } from '../../lib/quota';
 import type { AccountView } from '../../lib/types';
 
@@ -96,7 +96,10 @@ export function AccountsTable({ accounts, selectedAccountId, onSelect }: Account
             <td className="px-4 py-4"><Badge status={account.status} /></td>
             <td className="px-4 py-4 text-[color:var(--text-secondary)]">{formatNumber(account.totalRequests ?? 0)}</td>
             <td className="px-4 py-4 text-[color:var(--text-secondary)]">{formatNumber(account.totalErrors ?? 0)}</td>
-            <td className="px-4 py-4 text-[color:var(--text-secondary)]">{formatNumber(account.usage.totalTokens)}</td>
+            <td className="px-4 py-4 text-[color:var(--text-secondary)]">
+              <p className="font-medium text-[color:var(--text-primary)]">{formatTokenCompact(account.usage.todayTotalTokens || 0)}</p>
+              <p className="mt-1 text-xs text-[color:var(--text-secondary)]">累计 {formatTokenCompact(account.usage.lifetimeTotalTokens || account.usage.totalTokens)}</p>
+            </td>
             <td className="px-4 py-4 text-[color:var(--text-secondary)]">{formatDateTime(account.lastUsedAt)}</td>
             <td className="px-4 py-4 text-[color:var(--text-secondary)]">{formatDateTime(account.lastRefreshedAt)}</td>
             <td className="px-4 py-4 text-[color:var(--text-secondary)]"><QuotaBars account={account} /></td>

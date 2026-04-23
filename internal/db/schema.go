@@ -83,7 +83,67 @@ CREATE TABLE IF NOT EXISTS codex_accounts (
 	if err := migrateAddStatusColumns(db, d); err != nil {
 		return err
 	}
+	if err := setupUsageDailySchema(db, d); err != nil {
+		return err
+	}
 	return nil
+}
+
+func setupUsageDailySchema(db *sql.DB, d Dialect) error {
+	var ddl string
+	switch d {
+	case DialectMySQL:
+		ddl = `
+CREATE TABLE IF NOT EXISTS codex_usage_daily (
+	id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+	account_key VARCHAR(768) NOT NULL,
+	account_id VARCHAR(768) NULL,
+	email VARCHAR(768) NULL,
+	usage_date DATE NOT NULL,
+	request_count BIGINT NOT NULL DEFAULT 0,
+	input_tokens BIGINT NOT NULL DEFAULT 0,
+	output_tokens BIGINT NOT NULL DEFAULT 0,
+	total_tokens BIGINT NOT NULL DEFAULT 0,
+	created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+	updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
+	UNIQUE KEY uk_codex_usage_daily_account_date (account_key, usage_date),
+	KEY idx_codex_usage_daily_usage_date (usage_date)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`
+	case DialectSQLite:
+		ddl = `
+CREATE TABLE IF NOT EXISTS codex_usage_daily (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	account_key TEXT NOT NULL,
+	account_id TEXT,
+	email TEXT,
+	usage_date TEXT NOT NULL,
+	request_count INTEGER NOT NULL DEFAULT 0,
+	input_tokens INTEGER NOT NULL DEFAULT 0,
+	output_tokens INTEGER NOT NULL DEFAULT 0,
+	total_tokens INTEGER NOT NULL DEFAULT 0,
+	created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+	updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+	UNIQUE(account_key, usage_date)
+)`
+	default:
+		ddl = `
+CREATE TABLE IF NOT EXISTS codex_usage_daily (
+	id BIGSERIAL PRIMARY KEY,
+	account_key TEXT NOT NULL,
+	account_id TEXT,
+	email TEXT,
+	usage_date DATE NOT NULL,
+	request_count BIGINT NOT NULL DEFAULT 0,
+	input_tokens BIGINT NOT NULL DEFAULT 0,
+	output_tokens BIGINT NOT NULL DEFAULT 0,
+	total_tokens BIGINT NOT NULL DEFAULT 0,
+	created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	UNIQUE(account_key, usage_date)
+)`
+	}
+	_, err := db.Exec(ddl)
+	return err
 }
 
 /* migrateAddStatusColumns 为旧表添加新的状态列 */

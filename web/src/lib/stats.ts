@@ -10,6 +10,9 @@ import type {
   SummaryView,
   UsageStatsResponse,
   UsageView,
+  TokenBucketResponse,
+  TokenBucketView,
+  TokenOverviewView,
 } from './types';
 
 function toNumber(input: unknown): number {
@@ -40,6 +43,50 @@ function toUsageView(input: UsageStatsResponse | undefined): UsageView {
     inputTokens: toNumber(input?.input_tokens),
     outputTokens: toNumber(input?.output_tokens),
     totalTokens: toNumber(input?.total_tokens),
+    todayInputTokens: toNumber(input?.today_input_tokens),
+    todayOutputTokens: toNumber(input?.today_output_tokens),
+    todayTotalTokens: toNumber(input?.today_total_tokens),
+    todayRequestCount: toNumber(input?.today_request_count),
+    sevenDayInputTokens: toNumber(input?.seven_day_input_tokens),
+    sevenDayOutputTokens: toNumber(input?.seven_day_output_tokens),
+    sevenDayTotalTokens: toNumber(input?.seven_day_total_tokens),
+    sevenDayRequestCount: toNumber(input?.seven_day_request_count),
+    thirtyDayInputTokens: toNumber(input?.thirty_day_input_tokens),
+    thirtyDayOutputTokens: toNumber(input?.thirty_day_output_tokens),
+    thirtyDayTotalTokens: toNumber(input?.thirty_day_total_tokens),
+    thirtyDayRequestCount: toNumber(input?.thirty_day_request_count),
+    lifetimeInputTokens: toNumber(input?.lifetime_input_tokens) || toNumber(input?.input_tokens),
+    lifetimeOutputTokens: toNumber(input?.lifetime_output_tokens) || toNumber(input?.output_tokens),
+    lifetimeTotalTokens: toNumber(input?.lifetime_total_tokens) || toNumber(input?.total_tokens),
+    lifetimeRequestCount: toNumber(input?.lifetime_request_count) || toNumber(input?.total_completions),
+  };
+}
+
+function toTokenBucketView(input: TokenBucketResponse | undefined): TokenBucketView {
+  return {
+    inputTokens: toNumber(input?.input_tokens),
+    outputTokens: toNumber(input?.output_tokens),
+    totalTokens: toNumber(input?.total_tokens),
+    requestCount: toNumber(input?.request_count),
+  };
+}
+
+function toTokenOverviewView(input: StatsResponse['summary']): TokenOverviewView {
+  const totalInput = toNumber(input?.total_input_tokens);
+  const totalOutput = toNumber(input?.total_output_tokens);
+  const lifetime = toTokenBucketView(input?.token_overview?.lifetime);
+
+  return {
+    today: toTokenBucketView(input?.token_overview?.today),
+    sevenDays: toTokenBucketView(input?.token_overview?.seven_days),
+    thirtyDays: toTokenBucketView(input?.token_overview?.thirty_days),
+    lifetime: {
+      ...lifetime,
+      inputTokens: lifetime.inputTokens || totalInput,
+      outputTokens: lifetime.outputTokens || totalOutput,
+      totalTokens: lifetime.totalTokens || totalInput + totalOutput,
+    },
+    updatedAt: toDateString(input?.token_overview?.updated_at),
   };
 }
 
@@ -89,6 +136,7 @@ function toSummaryView(input: StatsResponse['summary']): SummaryView {
     rpm: toNumber(input?.rpm),
     totalInputTokens: toNumber(input?.total_input_tokens),
     totalOutputTokens: toNumber(input?.total_output_tokens),
+    tokenOverview: toTokenOverviewView(input),
   };
 }
 

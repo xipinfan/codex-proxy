@@ -8,6 +8,7 @@ import { Toast } from '../../components/ui/Toast';
 import { AccountDetailDrawer } from '../account-detail/AccountDetailDrawer';
 import { OAuthImportDialog } from '../oauth-import/OAuthImportDialog';
 import { SettingsDialog } from '../settings/SettingsDialog';
+import { TokenOverviewDrawer } from '../token-overview/TokenOverviewDrawer';
 import { AccountsTable } from './AccountsTable';
 import { StatsOverview } from './StatsOverview';
 import { completeCodexOAuth, deleteAccount, fetchStats, ingestAccounts, pollCodexOAuth, runProgressAction, startCodexOAuth } from '../../lib/api';
@@ -38,6 +39,13 @@ const emptyStats: StatsView = {
     rpm: 0,
     totalInputTokens: 0,
     totalOutputTokens: 0,
+    tokenOverview: {
+      today: { inputTokens: 0, outputTokens: 0, totalTokens: 0, requestCount: 0 },
+      sevenDays: { inputTokens: 0, outputTokens: 0, totalTokens: 0, requestCount: 0 },
+      thirtyDays: { inputTokens: 0, outputTokens: 0, totalTokens: 0, requestCount: 0 },
+      lifetime: { inputTokens: 0, outputTokens: 0, totalTokens: 0, requestCount: 0 },
+      updatedAt: null,
+    },
   },
   accounts: [],
   pagination: {
@@ -91,7 +99,10 @@ export function DashboardPage({
     }
 
     return {
-      summary: summary ?? emptyStats.summary,
+      summary: {
+        ...emptyStats.summary,
+        ...(summary ?? {}),
+      },
       accounts: accounts ?? [],
       pagination: initialStats.pagination ?? emptyStats.pagination,
     };
@@ -109,6 +120,7 @@ export function DashboardPage({
   const [selectedAccountId, setSelectedAccountId] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [oauthOpen, setOauthOpen] = useState(false);
+  const [tokenOverviewOpen, setTokenOverviewOpen] = useState(false);
   const [actionMessage, setActionMessage] = useState<{ tone: 'success' | 'error' | 'info'; text: string } | null>(null);
   const [streamAction, setStreamAction] = useState<{ kind: 'refresh' | 'quota'; text: string } | null>(null);
 
@@ -374,7 +386,7 @@ export function DashboardPage({
           ))}
         </section>
       ) : (
-        <StatsOverview summary={stats.summary} />
+        <StatsOverview summary={stats.summary} onOpenTokenOverview={() => setTokenOverviewOpen(true)} />
       )}
 
       <Card className="overflow-hidden rounded-[32px] p-0">
@@ -447,6 +459,7 @@ export function DashboardPage({
       </Card>
 
       <AccountDetailDrawer account={selectedAccount} open={Boolean(selectedAccount)} onClose={() => setSelectedAccountId(null)} onDeleteAccount={handleDeleteAccount} />
+      <TokenOverviewDrawer open={tokenOverviewOpen} onClose={() => setTokenOverviewOpen(false)} summary={stats.summary} accounts={stats.accounts} />
       <SettingsDialog open={settingsOpen} initialValue={settings} onSave={handleSaveSettings} onClose={() => setSettingsOpen(false)} />
       <OAuthImportDialog
         open={oauthOpen}

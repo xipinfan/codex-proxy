@@ -4,6 +4,7 @@ import type { SummaryView } from '../../lib/types';
 
 interface StatsOverviewProps {
   summary: SummaryView;
+  onOpenTokenOverview?: () => void;
 }
 
 const cards = [
@@ -14,7 +15,8 @@ const cards = [
   { key: 'rpm', label: '每分钟请求', accent: 'from-[#6bbad1] to-[#cadff0]' },
 ] as const;
 
-export function StatsOverview({ summary }: StatsOverviewProps) {
+export function StatsOverview({ summary, onOpenTokenOverview }: StatsOverviewProps) {
+  const today = summary.tokenOverview?.today ?? { inputTokens: 0, outputTokens: 0, totalTokens: 0, requestCount: 0 };
   return (
     <section className="grid gap-4 xl:grid-cols-[repeat(6,minmax(0,1fr))]">
       {cards.map((card) => (
@@ -29,17 +31,24 @@ export function StatsOverview({ summary }: StatsOverviewProps) {
       ))}
       <Card className="relative overflow-hidden rounded-[30px] bg-[rgba(255,250,245,0.88)]">
         <div className="absolute right-[-42px] top-[-42px] h-28 w-28 rounded-full bg-[rgba(59,184,197,0.14)] blur-2xl" />
-        <p className="relative text-xs font-semibold tracking-[0.18em] text-[color:var(--text-secondary)]">令牌流量</p>
-        <div className="mt-3 grid gap-3 text-sm text-[color:var(--text-secondary)]">
-          <div className="flex items-center justify-between">
-            <span>输入</span>
-            <span className="font-semibold text-[color:var(--text-primary)]">{formatNumber(summary.totalInputTokens)}</span>
+        <button type="button" onClick={onOpenTokenOverview} className="relative block w-full text-left">
+          <p className="text-xs font-semibold tracking-[0.18em] text-[color:var(--text-secondary)]">Token 概览</p>
+          <p className="mt-2 text-2xl font-semibold">{formatCompactNumber(today.totalTokens || 0)}</p>
+          <div className="mt-3 grid gap-2 text-sm text-[color:var(--text-secondary)]">
+            <div className="flex items-center justify-between">
+              <span>输入</span>
+              <span className="font-semibold text-[color:var(--text-primary)]">{formatNumber(today.inputTokens || 0)}</span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span>输出</span>
+              <span className="font-semibold text-[color:var(--text-primary)]">{formatNumber(today.outputTokens || 0)}</span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span>请求数</span>
+              <span className="font-semibold text-[color:var(--text-primary)]">{formatNumber(today.requestCount || 0)}</span>
+            </div>
           </div>
-          <div className="flex items-center justify-between">
-            <span>输出</span>
-            <span className="font-semibold text-[color:var(--text-primary)]">{formatNumber(summary.totalOutputTokens)}</span>
-          </div>
-        </div>
+        </button>
       </Card>
     </section>
   );

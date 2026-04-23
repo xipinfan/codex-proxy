@@ -2,7 +2,7 @@ import { Badge } from '../../components/ui/Badge';
 import { Button } from '../../components/ui/Button';
 import { Card } from '../../components/ui/Card';
 import { Drawer } from '../../components/ui/Drawer';
-import { formatDateTime, formatNumber } from '../../lib/format';
+import { formatDateTime, formatNumber, formatTokenFull } from '../../lib/format';
 import type { AccountView } from '../../lib/types';
 import { QuotaPanel } from './QuotaPanel';
 import { useState } from 'react';
@@ -53,23 +53,42 @@ export function AccountDetailDrawer({ account, open, onClose, onDeleteAccount }:
 
           <Card className="rounded-[24px] bg-white/72 shadow-none">
             <p className="text-xs font-semibold tracking-[0.22em] text-[color:var(--text-secondary)]">用量概览</p>
+            <div className="mt-4 grid gap-3 sm:grid-cols-2">
+              <div className="rounded-[18px] bg-[rgba(255,255,255,0.72)] px-3 py-2">
+                <p className="text-xs text-[color:var(--text-secondary)]">今日</p>
+                <p className="mt-1 text-lg font-semibold">{formatTokenFull(account.usage.todayTotalTokens)}</p>
+              </div>
+              <div className="rounded-[18px] bg-[rgba(255,255,255,0.72)] px-3 py-2">
+                <p className="text-xs text-[color:var(--text-secondary)]">近 7 日</p>
+                <p className="mt-1 text-lg font-semibold">{formatTokenFull(account.usage.sevenDayTotalTokens)}</p>
+              </div>
+              <div className="rounded-[18px] bg-[rgba(255,255,255,0.72)] px-3 py-2">
+                <p className="text-xs text-[color:var(--text-secondary)]">近 30 日</p>
+                <p className="mt-1 text-lg font-semibold">{formatTokenFull(account.usage.thirtyDayTotalTokens)}</p>
+              </div>
+              <div className="rounded-[18px] bg-[rgba(255,255,255,0.72)] px-3 py-2">
+                <p className="text-xs text-[color:var(--text-secondary)]">累计</p>
+                <p className="mt-1 text-lg font-semibold">{formatTokenFull(account.usage.lifetimeTotalTokens || account.usage.totalTokens)}</p>
+              </div>
+            </div>
             <div className="mt-4 grid gap-3 sm:grid-cols-3">
               <div>
                 <p className="text-xs text-[color:var(--text-secondary)]">完成次数</p>
-                <p className="mt-1 text-xl font-semibold">{formatNumber(account.usage.totalCompletions)}</p>
+                <p className="mt-1 text-xl font-semibold">{formatNumber(account.usage.lifetimeRequestCount || account.usage.totalCompletions)}</p>
               </div>
               <div>
                 <p className="text-xs text-[color:var(--text-secondary)]">输入</p>
-                <p className="mt-1 text-xl font-semibold">{formatNumber(account.usage.inputTokens)}</p>
+                <p className="mt-1 text-xl font-semibold">{formatNumber(account.usage.lifetimeInputTokens || account.usage.inputTokens)}</p>
               </div>
               <div>
                 <p className="text-xs text-[color:var(--text-secondary)]">输出</p>
-                <p className="mt-1 text-xl font-semibold">{formatNumber(account.usage.outputTokens)}</p>
+                <p className="mt-1 text-xl font-semibold">{formatNumber(account.usage.lifetimeOutputTokens || account.usage.outputTokens)}</p>
               </div>
             </div>
             <div className="mt-4 rounded-[22px] bg-[rgba(32,25,22,0.04)] px-4 py-3">
               <p className="text-xs font-semibold tracking-[0.18em] text-[color:var(--text-secondary)]">令牌总量</p>
-              <p className="mt-1 text-2xl font-semibold">{formatNumber(account.usage.totalTokens)}</p>
+              <p className="mt-1 text-2xl font-semibold">{formatNumber(account.usage.lifetimeTotalTokens || account.usage.totalTokens)}</p>
+              <p className="mt-1 text-xs text-[color:var(--text-secondary)]">统计基于系统记录到的 usage 聚合，不等同于 OpenAI 官方账单。</p>
             </div>
           </Card>
 

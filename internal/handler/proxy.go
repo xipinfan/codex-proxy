@@ -692,11 +692,18 @@ func (h *ProxyHandler) handleStats(ctx *fasthttp.RequestCtx) {
 	accounts := h.manager.GetAccounts()
 	active, cooldown, disabled := 0, 0, 0
 	var totalInputTokens, totalOutputTokens int64
+	usageOverview, accountUsageOverview, usageErr := h.manager.UsageOverviewForAccounts(accounts, time.Now())
+	if usageErr != nil {
+		log.Warnf("加载 usage 聚合概览失败: %v", usageErr)
+	}
 
 	if !pageMode {
 		stats := make([]auth.AccountStats, 0, len(accounts))
 		for _, acc := range accounts {
 			s := acc.GetStats()
+			if usage, ok := accountUsageOverview[acc.GetUsageKey()]; ok {
+				auth.ApplyUsageOverview(&s.Usage, usage)
+			}
 			stats = append(stats, s)
 			totalInputTokens += s.Usage.InputTokens
 			totalOutputTokens += s.Usage.OutputTokens
@@ -709,6 +716,13 @@ func (h *ProxyHandler) handleStats(ctx *fasthttp.RequestCtx) {
 				disabled++
 			}
 		}
+		if usageOverview.Lifetime.TotalTokens == 0 && (totalInputTokens > 0 || totalOutputTokens > 0) {
+			usageOverview.Lifetime = auth.UsageBucket{
+				InputTokens:  totalInputTokens,
+				OutputTokens: totalOutputTokens,
+				TotalTokens:  totalInputTokens + totalOutputTokens,
+			}
+		}
 
 		writeJSON(ctx, fasthttp.StatusOK, map[string]any{
 			"summary": map[string]any{
@@ -719,6 +733,7 @@ func (h *ProxyHandler) handleStats(ctx *fasthttp.RequestCtx) {
 				"rpm":                 GetRPM(),
 				"total_input_tokens":  totalInputTokens,
 				"total_output_tokens": totalOutputTokens,
+				"token_overview":      usageOverview,
 			},
 			"accounts": stats,
 		})
@@ -734,6 +749,9 @@ func (h *ProxyHandler) handleStats(ctx *fasthttp.RequestCtx) {
 
 	for _, acc := range accounts {
 		s := acc.GetStats()
+		if usage, ok := accountUsageOverview[acc.GetUsageKey()]; ok {
+			auth.ApplyUsageOverview(&s.Usage, usage)
+		}
 		totalInputTokens += s.Usage.InputTokens
 		totalOutputTokens += s.Usage.OutputTokens
 		switch s.Status {
@@ -759,6 +777,13 @@ func (h *ProxyHandler) handleStats(ctx *fasthttp.RequestCtx) {
 		}
 		stats = append(stats, s)
 	}
+	if usageOverview.Lifetime.TotalTokens == 0 && (totalInputTokens > 0 || totalOutputTokens > 0) {
+		usageOverview.Lifetime = auth.UsageBucket{
+			InputTokens:  totalInputTokens,
+			OutputTokens: totalOutputTokens,
+			TotalTokens:  totalInputTokens + totalOutputTokens,
+		}
+	}
 
 	totalPages := 1
 	if filteredTotal > 0 {
@@ -774,6 +799,7 @@ func (h *ProxyHandler) handleStats(ctx *fasthttp.RequestCtx) {
 			"rpm":                 GetRPM(),
 			"total_input_tokens":  totalInputTokens,
 			"total_output_tokens": totalOutputTokens,
+			"token_overview":      usageOverview,
 		},
 		"accounts": stats,
 		"pagination": statsPagination{

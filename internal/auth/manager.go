@@ -95,6 +95,7 @@ type Manager struct {
 	refreshSingleTimeoutSec int
 	refreshBatchSize        int
 	saveQueue               chan *Account /* 异步磁盘写入队列 */
+	usagePersistSem         chan struct{}
 	stopCh                  chan struct{}
 	importMu                sync.Mutex /* 防止并发导入账号文件到数据库 */
 	refreshHTTPPolicy       map[int]httpStatusPolicy
@@ -139,6 +140,7 @@ func NewManager(authDir string, db *sql.DB, proxyURL string, refreshInterval int
 		cooldown429Sec:          defaultCooldown429Sec,
 		refreshSingleTimeoutSec: defaultRefreshSingleTimeoutSec,
 		saveQueue:               make(chan *Account, 4096),
+		usagePersistSem:         make(chan struct{}, 256),
 		stopCh:                  make(chan struct{}),
 	}
 	if opts != nil {
@@ -462,6 +464,7 @@ func (m *Manager) mergeAppendAccounts(newAccs []*Account) (added int) {
 		if acc == nil {
 			continue
 		}
+		m.attachAccountUsageRecorder(acc)
 		if _, exists := m.accountIndex[acc.FilePath]; exists {
 			continue
 		}
@@ -619,6 +622,9 @@ func (m *Manager) LoadAccounts() error {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	for _, acc := range accounts {
+		m.attachAccountUsageRecorder(acc)
+	}
 	m.accounts = accounts
 	m.accountIndex = index
 	m.publishSnapshot()
@@ -812,6 +818,9 @@ func (m *Manager) loadAccountsFromDB() error {
 		return err
 	}
 
+	for _, acc := range accounts {
+		m.attachAccountUsageRecorder(acc)
+	}
 	m.accounts = accounts
 	m.accountIndex = index
 	return nil
@@ -1871,6 +1880,7 @@ func (m *Manager) scanNewFiles() {
 	newCount := 0
 	for _, entry := range loaded {
 		if _, exists := m.accountIndex[entry.path]; !exists {
+			m.attachAccountUsageRecorder(entry.acc)
 			m.accounts = append(m.accounts, entry.acc)
 			m.accountIndex[entry.path] = entry.acc
 			newCount++

@@ -31,6 +31,22 @@ const sampleAccount = {
     inputTokens: 200,
     outputTokens: 50,
     totalTokens: 250,
+    todayInputTokens: 40,
+    todayOutputTokens: 10,
+    todayTotalTokens: 50,
+    todayRequestCount: 2,
+    sevenDayInputTokens: 120,
+    sevenDayOutputTokens: 30,
+    sevenDayTotalTokens: 150,
+    sevenDayRequestCount: 6,
+    thirtyDayInputTokens: 200,
+    thirtyDayOutputTokens: 50,
+    thirtyDayTotalTokens: 250,
+    thirtyDayRequestCount: 12,
+    lifetimeInputTokens: 200,
+    lifetimeOutputTokens: 50,
+    lifetimeTotalTokens: 250,
+    lifetimeRequestCount: 12,
   },
 };
 
@@ -62,6 +78,36 @@ describe('DashboardPage', () => {
     );
 
     expect(screen.getByText(/401 Unauthorized/i)).toBeInTheDocument();
+  });
+
+  it('opens token overview drawer when token card is clicked', async () => {
+    const user = userEvent.setup();
+
+    render(
+      <DashboardPage
+        summary={{
+          total: 1,
+          active: 1,
+          cooldown: 0,
+          disabled: 0,
+          rpm: 2,
+          totalInputTokens: 200,
+          totalOutputTokens: 50,
+          tokenOverview: {
+            today: { inputTokens: 40, outputTokens: 10, totalTokens: 50, requestCount: 2 },
+            sevenDays: { inputTokens: 120, outputTokens: 30, totalTokens: 150, requestCount: 6 },
+            thirtyDays: { inputTokens: 200, outputTokens: 50, totalTokens: 250, requestCount: 12 },
+            lifetime: { inputTokens: 200, outputTokens: 50, totalTokens: 250, requestCount: 12 },
+            updatedAt: '2026-04-23T00:00:00Z',
+          },
+        }}
+        accounts={[sampleAccount]}
+        errorMessage=""
+      />
+    );
+
+    await user.click(screen.getByRole('button', { name: /Token 概览/i }));
+    expect(screen.getByRole('dialog', { name: /Token 概览/i })).toBeInTheDocument();
   });
 });
 

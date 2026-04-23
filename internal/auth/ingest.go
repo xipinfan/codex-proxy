@@ -235,6 +235,7 @@ func (m *Manager) IngestAccountsFromJSON(body []byte) (IngestResult, error) {
 			res.Updated++
 			log.Debugf("账号上传: 更新 ident=%s path=%s has_refresh_token=%t", ingestLogIdent(ex), ex.FilePath, ex.HasRefreshToken())
 		} else {
+			m.attachAccountUsageRecorder(acc)
 			m.accounts = append(m.accounts, acc)
 			m.accountIndex[acc.FilePath] = acc
 			m.publishSnapshot()

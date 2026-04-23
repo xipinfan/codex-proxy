@@ -67,8 +67,8 @@ export function QuotaPanel({ account }: { account: AccountView }) {
 
       <div className="relative mt-4 grid gap-3 text-sm text-[color:var(--text-secondary)] sm:grid-cols-2">
         <div className="rounded-[20px] bg-white/62 px-4 py-3">
-          <p className="text-xs font-semibold tracking-[0.16em]">历史令牌消耗</p>
-          <p className="mt-1 font-medium text-[color:var(--text-primary)]">{formatNumber(account.usage.totalTokens)}</p>
+          <p className="text-xs font-semibold tracking-[0.16em]">累计 Token</p>
+          <p className="mt-1 font-medium text-[color:var(--text-primary)]">{formatNumber(account.usage.lifetimeTotalTokens || account.usage.totalTokens)}</p>
         </div>
         <div className="rounded-[20px] bg-white/62 px-4 py-3">
           <p className="text-xs font-semibold tracking-[0.16em]">最近检查</p>

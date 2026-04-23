@@ -156,6 +156,7 @@ func (m *Manager) RunDisabledCredentialRecovery(ctx context.Context, qc *QuotaCh
 			}
 			continue
 		}
+		m.attachAccountUsageRecorder(acc)
 		m.accounts = append(m.accounts, acc)
 		m.accountIndex[jsonPath] = acc
 		m.publishSnapshot()

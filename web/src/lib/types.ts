@@ -16,6 +16,22 @@ export interface SummaryView {
   rpm: number;
   totalInputTokens: number;
   totalOutputTokens: number;
+  tokenOverview?: TokenOverviewView;
+}
+
+export interface TokenBucketView {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  requestCount: number;
+}
+
+export interface TokenOverviewView {
+  today: TokenBucketView;
+  sevenDays: TokenBucketView;
+  thirtyDays: TokenBucketView;
+  lifetime: TokenBucketView;
+  updatedAt: string | null;
 }
 
 export interface UsageView {
@@ -23,6 +39,22 @@ export interface UsageView {
   inputTokens: number;
   outputTokens: number;
   totalTokens: number;
+  todayInputTokens: number;
+  todayOutputTokens: number;
+  todayTotalTokens: number;
+  todayRequestCount: number;
+  sevenDayInputTokens: number;
+  sevenDayOutputTokens: number;
+  sevenDayTotalTokens: number;
+  sevenDayRequestCount: number;
+  thirtyDayInputTokens: number;
+  thirtyDayOutputTokens: number;
+  thirtyDayTotalTokens: number;
+  thirtyDayRequestCount: number;
+  lifetimeInputTokens: number;
+  lifetimeOutputTokens: number;
+  lifetimeTotalTokens: number;
+  lifetimeRequestCount: number;
 }
 
 export interface QuotaView {
@@ -97,6 +129,29 @@ export interface UsageStatsResponse {
   input_tokens?: number;
   output_tokens?: number;
   total_tokens?: number;
+  today_input_tokens?: number;
+  today_output_tokens?: number;
+  today_total_tokens?: number;
+  today_request_count?: number;
+  seven_day_input_tokens?: number;
+  seven_day_output_tokens?: number;
+  seven_day_total_tokens?: number;
+  seven_day_request_count?: number;
+  thirty_day_input_tokens?: number;
+  thirty_day_output_tokens?: number;
+  thirty_day_total_tokens?: number;
+  thirty_day_request_count?: number;
+  lifetime_input_tokens?: number;
+  lifetime_output_tokens?: number;
+  lifetime_total_tokens?: number;
+  lifetime_request_count?: number;
+}
+
+export interface TokenBucketResponse {
+  input_tokens?: number;
+  output_tokens?: number;
+  total_tokens?: number;
+  request_count?: number;
 }
 
 export interface QuotaInfoResponse {
@@ -134,6 +189,13 @@ export interface StatsResponse {
     rpm?: number;
     total_input_tokens?: number;
     total_output_tokens?: number;
+    token_overview?: {
+      today?: TokenBucketResponse;
+      seven_days?: TokenBucketResponse;
+      thirty_days?: TokenBucketResponse;
+      lifetime?: TokenBucketResponse;
+      updated_at?: string;
+    };
   };
   accounts?: AccountStatsResponse[];
   pagination?: {

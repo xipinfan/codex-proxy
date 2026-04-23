@@ -14,8 +14,8 @@ describe('AccountDetailDrawer', () => {
     expect(screen.getByText(/7 日额度/i)).toBeInTheDocument();
     expect(screen.getByText(/78%/i)).toBeInTheDocument();
     expect(screen.getByText(/97%/i)).toBeInTheDocument();
-    expect(screen.getByText(/历史令牌消耗/i)).toBeInTheDocument();
-    expect(screen.getAllByText(/5,000/i)).toHaveLength(2);
+    expect(screen.getByText(/累计 Token/i)).toBeInTheDocument();
+    expect(screen.getAllByText(/5,000/i).length).toBeGreaterThanOrEqual(2);
   });
 
   it('renders fallback when quota data is missing', () => {
