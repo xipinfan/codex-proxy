@@ -8,6 +8,7 @@ package handler
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -29,11 +30,17 @@ func pumpClaudeCodexSSE(s *executor.CodexResponsesStream, w io.Writer, flush fun
 	body := s.UpstreamBody()
 	defer func() { _ = body.Close() }()
 	state := translator.NewClaudeStreamState(model)
+	usage := translator.ResponseUsage{}
+	outputTextAcc := translator.NewResponseOutputTextAccumulator()
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, scannerInitSize), scannerMaxSize)
 
 	for scanner.Scan() {
 		line := scanner.Bytes()
+		if extracted := translator.ExtractResponseUsageFromSSELine(line); extracted.FoundCompleted {
+			usage = extracted
+		}
+		outputTextAcc.AddSSELine(line)
 		if debugUpstream {
 			ae := ""
 			if acc := s.StreamAccount(); acc != nil {
@@ -72,6 +79,10 @@ func pumpClaudeCodexSSE(s *executor.CodexResponsesStream, w io.Writer, flush fun
 		}
 		if state.MessageStartEmitted || state.Completed {
 			if acc := s.StreamAccount(); acc != nil {
+				usage = executor.EstimateUsageWithFallback(usage, outputTextAcc.Text(), s.EstimatedPromptTokens(), model)
+				if usage.FoundUsage && (usage.InputTokens > 0 || usage.OutputTokens > 0) {
+					acc.RecordUsage(usage.InputTokens, usage.OutputTokens, usage.TotalTokens)
+				}
 				acc.RecordSuccess()
 			}
 			return nil
@@ -88,6 +99,10 @@ func pumpClaudeCodexSSE(s *executor.CodexResponsesStream, w io.Writer, flush fun
 		}
 	}
 	if acc := s.StreamAccount(); acc != nil {
+		usage = executor.EstimateUsageWithFallback(usage, outputTextAcc.Text(), s.EstimatedPromptTokens(), model)
+		if usage.FoundUsage && (usage.InputTokens > 0 || usage.OutputTokens > 0) {
+			acc.RecordUsage(usage.InputTokens, usage.OutputTokens, usage.TotalTokens)
+		}
 		acc.RecordSuccess()
 	}
 	return nil
@@ -209,12 +224,32 @@ func (h *ProxyHandler) executeClaudeNonStream(ctx *fasthttp.RequestCtx, rc execu
 	if !result.HasText && !result.HasToolUse && !result.HasThinking {
 		return executor.ErrEmptyResponse
 	}
+	estimatedPromptTokens := executor.EstimatePromptTokensFromRequest(openaiBody, model)
+	usage := extractClaudeUsageFromSSE(data)
+	usage = executor.EstimateUsageWithFallback(usage, extractClaudeOutputTextFromSSE(data), estimatedPromptTokens, model)
+	if usage.FoundUsage && (usage.InputTokens > 0 || usage.OutputTokens > 0) {
+		account.RecordUsage(usage.InputTokens, usage.OutputTokens, usage.TotalTokens)
+	}
 
 	account.RecordSuccess()
 	ctx.Response.Header.Set("Content-Type", "application/json")
 	ctx.SetStatusCode(fasthttp.StatusOK)
 	ctx.SetBody([]byte(result.JSON))
 	return nil
+}
+
+func extractClaudeUsageFromSSE(data []byte) translator.ResponseUsage {
+	lines := bytes.Split(data, []byte("\n"))
+	for _, line := range lines {
+		if usage := translator.ExtractResponseUsageFromSSELine(line); usage.FoundCompleted {
+			return usage
+		}
+	}
+	return translator.ResponseUsage{}
+}
+
+func extractClaudeOutputTextFromSSE(data []byte) string {
+	return translator.ExtractResponseOutputTextFromSSEPayload(data)
 }
 
 /**

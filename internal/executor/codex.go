@@ -799,6 +799,7 @@ func (e *Executor) ExecuteNonStream(ctx context.Context, rc RetryConfig, request
 	convertDur := time.Since(convertStart)
 	apiURL := e.baseURL + "/responses"
 	reverseToolMap := translator.BuildReverseToolNameMap(requestBody)
+	estimatedPromptTokens := estimatePromptTokensFromRequest(requestBody, baseModel)
 	emptyRetryMax := rc.EmptyRetryMax
 	if emptyRetryMax < 0 {
 		emptyRetryMax = 0
@@ -832,20 +833,17 @@ func (e *Executor) ExecuteNonStream(ctx context.Context, rc RetryConfig, request
 				break
 			}
 			/* 仅在有有效输出时才记录 usage */
-			usage := gjson.GetBytes(jsonData, "response.usage")
-			var inputTokens, outputTokens, totalTokens int64
-			if usage.Exists() {
-				inputTokens = usage.Get("input_tokens").Int()
-				outputTokens = usage.Get("output_tokens").Int()
-				totalTokens = usage.Get("total_tokens").Int()
-			}
+			usage := translator.ExtractResponseUsageFromCompletedJSON(jsonData)
+			outputText := translator.ExtractResponseOutputTextFromCompletedJSON(jsonData)
+			inputTokens, outputTokens, totalTokens := usage.InputTokens, usage.OutputTokens, usage.TotalTokens
 			if inputTokens == 0 && outputTokens == 0 {
 				log.Warnf("nonstream usage is 0 or not found, model=%s account=%s response=%s, will estimate from output",
 					baseModel, account.GetEmail(), gjson.GetBytes(jsonData, "response.id").String())
-				outputTokens = estimateTokensFromOutput(baseModel)
-				totalTokens = outputTokens
-				log.Warnf("nonstream usage estimated output_tokens=%d total=%d model=%s account=%s",
-					outputTokens, totalTokens, baseModel, account.GetEmail())
+			}
+			usage = EstimateUsageWithFallback(usage, outputText, estimatedPromptTokens, baseModel)
+			inputTokens, outputTokens, totalTokens = usage.InputTokens, usage.OutputTokens, usage.TotalTokens
+			if inputTokens == 0 && outputTokens == 0 {
+				log.Warnf("nonstream all usage zero after estimate model=%s account=%s", baseModel, account.GetEmail())
 			}
 			if inputTokens > 0 || outputTokens > 0 {
 				account.RecordUsage(inputTokens, outputTokens, totalTokens)
@@ -931,6 +929,7 @@ func (e *Executor) ExecuteResponsesNonStream(ctx context.Context, rc RetryConfig
 	body, baseModel, isImage := thinking.ApplyThinking(requestBody, model)
 	codexBody := translator.ConvertOpenAIRequestToCodex(baseModel, body, true, isImage)
 	convertDur := time.Since(convertStart)
+	estimatedPromptTokens := estimatePromptTokensFromRequest(requestBody, baseModel)
 	apiURL := e.baseURL + "/responses"
 
 	readRounds := 1 + rc.EmptyRetryMax
@@ -968,13 +967,10 @@ func (e *Executor) ExecuteResponsesNonStream(ctx context.Context, rc RetryConfig
 			}
 			if resp := gjson.GetBytes(jsonData, "response"); resp.Exists() {
 				_ = httpResp.Body.Close()
-				usage := gjson.GetBytes(jsonData, "response.usage")
-				if usage.Exists() {
-					account.RecordUsage(
-						usage.Get("input_tokens").Int(),
-						usage.Get("output_tokens").Int(),
-						usage.Get("total_tokens").Int(),
-					)
+				usage := translator.ExtractResponseUsageFromCompletedJSON(jsonData)
+				usage = EstimateUsageWithFallback(usage, translator.ExtractResponseOutputTextFromCompletedJSON(jsonData), estimatedPromptTokens, baseModel)
+				if usage.FoundUsage && (usage.InputTokens > 0 || usage.OutputTokens > 0) {
+					account.RecordUsage(usage.InputTokens, usage.OutputTokens, usage.TotalTokens)
 				}
 				account.RecordSuccess()
 				log.Infof("req summary responses-nonstream model=%s account=%s attempts=%d convert=%v upstream=%v total=%v", baseModel, account.GetEmail(), attempts, convertDur, sendDur, time.Since(startTotal))
@@ -1056,6 +1052,9 @@ func (e *Executor) ExecuteResponsesCompactStream(ctx context.Context, rc RetryCo
 	if err := compact.PumpBody(writer, flush); err != nil {
 		return err
 	}
+	if usage := compact.Usage(); usage.FoundUsage && (usage.InputTokens > 0 || usage.OutputTokens > 0) {
+		compact.Account.RecordUsage(usage.InputTokens, usage.OutputTokens, usage.TotalTokens)
+	}
 	compact.Account.RecordSuccess()
 	log.Infof("req summary responses-compact-stream model=%s account=%s attempts=%d convert=%v upstream=%v total=%v", compact.BaseModel, compact.Account.GetEmail(), compact.Attempts, compact.ConvertDur, compact.SendDur, time.Since(startTotal))
 	return nil
@@ -1078,6 +1077,7 @@ func (e *Executor) ExecuteResponsesCompactNonStream(ctx context.Context, rc Retr
 	body, baseModel, _ := thinking.ApplyThinking(requestBody, model)
 	codexBody := cleanCompactBody(body, baseModel)
 	convertDur := time.Since(convertStart)
+	estimatedPromptTokens := estimatePromptTokensFromRequest(requestBody, baseModel)
 	apiURL := e.baseURL + "/responses/compact"
 
 	sendStart := time.Now()
@@ -1096,6 +1096,11 @@ func (e *Executor) ExecuteResponsesCompactNonStream(ctx context.Context, rc Retr
 		return nil, fmt.Errorf("读取响应失败: %w", wrapReadErr(err))
 	}
 
+	usage := translator.ExtractResponseUsageFromResponseObjectJSON(data)
+	usage = EstimateUsageWithFallback(usage, translator.ExtractResponseOutputTextFromResponseObjectJSON(data), estimatedPromptTokens, baseModel)
+	if usage.FoundUsage && (usage.InputTokens > 0 || usage.OutputTokens > 0) {
+		account.RecordUsage(usage.InputTokens, usage.OutputTokens, usage.TotalTokens)
+	}
 	account.RecordSuccess()
 	log.Infof("req summary responses-compact-nonstream model=%s account=%s attempts=%d convert=%v upstream=%v total=%v", baseModel, account.GetEmail(), attempts, convertDur, sendDur, time.Since(startTotal))
 	return data, nil
@@ -1114,12 +1119,13 @@ func (e *Executor) OpenCodexCompactStream(ctx context.Context, rc RetryConfig, r
 		return nil, err
 	}
 	return &CodexCompactStream{
-		Resp:       httpResp,
-		Account:    account,
-		Attempts:   attempts,
-		BaseModel:  baseModel,
-		ConvertDur: convertDur,
-		SendDur:    time.Since(sendStart),
+		Resp:                  httpResp,
+		Account:               account,
+		Attempts:              attempts,
+		BaseModel:             baseModel,
+		ConvertDur:            convertDur,
+		SendDur:               time.Since(sendStart),
+		estimatedPromptTokens: estimatePromptTokensFromRequest(requestBody, baseModel),
 	}, nil
 }
 

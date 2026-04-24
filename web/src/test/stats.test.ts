@@ -24,4 +24,45 @@ describe('adaptStatsResponse', () => {
     expect(adapted.accounts[0].usage.totalTokens).toBe(12);
     expect(adapted.accounts[0].usage.todayTotalTokens).toBe(3);
   });
+
+  it('keeps explicit zero lifetime values without falling back to legacy totals', () => {
+    const adapted = adaptStatsResponse({
+      summary: {
+        total_input_tokens: 999,
+        total_output_tokens: 111,
+        token_overview: {
+          lifetime: {
+            input_tokens: 0,
+            output_tokens: 0,
+            total_tokens: 0,
+            request_count: 0,
+          },
+        },
+      },
+      accounts: [
+        {
+          email: 'zero@example.com',
+          usage: {
+            input_tokens: 800,
+            output_tokens: 200,
+            total_tokens: 1000,
+            total_completions: 30,
+            lifetime_input_tokens: 0,
+            lifetime_output_tokens: 0,
+            lifetime_total_tokens: 0,
+            lifetime_request_count: 0,
+          },
+        },
+      ],
+      pagination: null,
+    });
+
+    expect(adapted.summary.tokenOverview?.lifetime.inputTokens).toBe(0);
+    expect(adapted.summary.tokenOverview?.lifetime.outputTokens).toBe(0);
+    expect(adapted.summary.tokenOverview?.lifetime.totalTokens).toBe(0);
+    expect(adapted.accounts[0].usage.lifetimeInputTokens).toBe(0);
+    expect(adapted.accounts[0].usage.lifetimeOutputTokens).toBe(0);
+    expect(adapted.accounts[0].usage.lifetimeTotalTokens).toBe(0);
+    expect(adapted.accounts[0].usage.lifetimeRequestCount).toBe(0);
+  });
 });

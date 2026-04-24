@@ -37,6 +37,13 @@ function toStatus(input: unknown): AccountStatus {
   return 'unknown';
 }
 
+function withFallback(primary: unknown, fallback: unknown): number {
+  if (primary === undefined || primary === null) {
+    return toNumber(fallback);
+  }
+  return toNumber(primary);
+}
+
 function toUsageView(input: UsageStatsResponse | undefined): UsageView {
   return {
     totalCompletions: toNumber(input?.total_completions),
@@ -55,10 +62,10 @@ function toUsageView(input: UsageStatsResponse | undefined): UsageView {
     thirtyDayOutputTokens: toNumber(input?.thirty_day_output_tokens),
     thirtyDayTotalTokens: toNumber(input?.thirty_day_total_tokens),
     thirtyDayRequestCount: toNumber(input?.thirty_day_request_count),
-    lifetimeInputTokens: toNumber(input?.lifetime_input_tokens) || toNumber(input?.input_tokens),
-    lifetimeOutputTokens: toNumber(input?.lifetime_output_tokens) || toNumber(input?.output_tokens),
-    lifetimeTotalTokens: toNumber(input?.lifetime_total_tokens) || toNumber(input?.total_tokens),
-    lifetimeRequestCount: toNumber(input?.lifetime_request_count) || toNumber(input?.total_completions),
+    lifetimeInputTokens: withFallback(input?.lifetime_input_tokens, input?.input_tokens),
+    lifetimeOutputTokens: withFallback(input?.lifetime_output_tokens, input?.output_tokens),
+    lifetimeTotalTokens: withFallback(input?.lifetime_total_tokens, input?.total_tokens),
+    lifetimeRequestCount: withFallback(input?.lifetime_request_count, input?.total_completions),
   };
 }
 
@@ -82,9 +89,9 @@ function toTokenOverviewView(input: StatsResponse['summary']): TokenOverviewView
     thirtyDays: toTokenBucketView(input?.token_overview?.thirty_days),
     lifetime: {
       ...lifetime,
-      inputTokens: lifetime.inputTokens || totalInput,
-      outputTokens: lifetime.outputTokens || totalOutput,
-      totalTokens: lifetime.totalTokens || totalInput + totalOutput,
+      inputTokens: withFallback(input?.token_overview?.lifetime?.input_tokens, totalInput),
+      outputTokens: withFallback(input?.token_overview?.lifetime?.output_tokens, totalOutput),
+      totalTokens: withFallback(input?.token_overview?.lifetime?.total_tokens, totalInput + totalOutput),
     },
     updatedAt: toDateString(input?.token_overview?.updated_at),
   };

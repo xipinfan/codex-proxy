@@ -2,6 +2,7 @@ package executor
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -39,6 +40,8 @@ type CodexResponsesStream struct {
 	reopenFn func(ctx context.Context) (io.ReadCloser, CodexResponsesMeta, error)
 	/* debugUpstreamStream 为 true 时 Info 打印上游原始 SSE（配置 debug-upstream-stream） */
 	debugUpstreamStream bool
+	/* estimatedPromptTokens 为缺少 usage 时输入 token 的估算兜底。 */
+	estimatedPromptTokens int64
 }
 
 /* Body 返回当前上游响应体，供外部 pump 读取 SSE */
@@ -194,17 +197,18 @@ func (e *Executor) OpenCodexResponsesStream(ctx context.Context, rc RetryConfig,
 	}
 	includeUsage := gjson.GetBytes(requestBody, "stream_options.include_usage").Bool()
 	s := &CodexResponsesStream{
-		body:                bodyRC,
-		account:             meta.Account,
-		Attempts:            meta.Attempts,
-		BaseModel:           meta.BaseModel,
-		ConvertDur:          meta.ConvertDur,
-		SendDur:             meta.SendDur,
-		reverseTools:        meta.ReverseTools,
-		IncludeUsage:        includeUsage,
-		pumpRounds:          codexStreamPumpRounds(rc.MaxRetry),
-		reopenExcluded:      make(map[string]bool),
-		debugUpstreamStream: rc.DebugUpstreamStream,
+		body:                  bodyRC,
+		account:               meta.Account,
+		Attempts:              meta.Attempts,
+		BaseModel:             meta.BaseModel,
+		ConvertDur:            meta.ConvertDur,
+		SendDur:               meta.SendDur,
+		reverseTools:          meta.ReverseTools,
+		IncludeUsage:          includeUsage,
+		pumpRounds:            codexStreamPumpRounds(rc.MaxRetry),
+		reopenExcluded:        make(map[string]bool),
+		debugUpstreamStream:   rc.DebugUpstreamStream,
+		estimatedPromptTokens: estimatePromptTokensFromRequest(requestBody, meta.BaseModel),
 	}
 	s.reopenFn = func(ctx context.Context) (io.ReadCloser, CodexResponsesMeta, error) {
 		rcEx := MergeRetryConfigExcluded(rc, s.reopenExcluded)
@@ -229,6 +233,14 @@ func (s *CodexResponsesStream) StreamAccount() *auth.Account {
 	return s.account
 }
 
+// EstimatedPromptTokens 返回当前请求在打开上游前估算的输入 token。
+func (s *CodexResponsesStream) EstimatedPromptTokens() int64 {
+	if s == nil {
+		return 0
+	}
+	return s.estimatedPromptTokens
+}
+
 // PumpChatCompletion 将 Codex SSE 转为 OpenAI Chat Completions 块写入 w（仅响应体；HTTP 响应头由 handler 事先设好）。
 // 若 pump 遇可重试上游读错误且尚未向响应体写入任何 SSE 消息（chunkCount==0，不含响应头），则换号重连，次数与 max-retry 对齐。
 func (s *CodexResponsesStream) PumpChatCompletion(w io.Writer, flush func()) error {
@@ -243,6 +255,7 @@ func (s *CodexResponsesStream) PumpChatCompletion(w io.Writer, flush func()) err
 	var state *translator.StreamState
 	var scanErr error
 	var pumpScanLines int
+	outputTextAcc := translator.NewResponseOutputTextAccumulator()
 	// 上一轮已在循环内因「空响应」完成换号 reopen，本轮开头勿再关 body
 	var skipLeadingReopen bool
 
@@ -279,6 +292,7 @@ func (s *CodexResponsesStream) PumpChatCompletion(w io.Writer, flush func()) err
 		for scanner.Scan() {
 			pumpScanLines++
 			line := scanner.Bytes()
+			outputTextAcc.AddSSELine(line)
 			if s.debugUpstreamStream {
 				ae := ""
 				if s.account != nil {
@@ -432,10 +446,19 @@ func (s *CodexResponsesStream) PumpChatCompletion(w io.Writer, flush func()) err
 	if inputTokens == 0 && outputTokens == 0 {
 		log.Warnf("req summary stream usage is 0, model=%s account=%s response_id=%s completed=%v has_text=%v has_tool=%v has_reasoning=%v, will estimate from output",
 			s.BaseModel, s.account.GetEmail(), state.ResponseID, state.Completed, state.HasText, state.HasToolCall, state.HasReasoning)
-		outputTokens = estimateTokensFromOutput(s.BaseModel)
-		totalTokens = outputTokens
-		log.Warnf("req summary stream usage estimated output_tokens=%d total=%d model=%s account=%s",
-			outputTokens, totalTokens, s.BaseModel, s.account.GetEmail())
+	}
+	estimated := EstimateUsageWithFallback(translator.ResponseUsage{
+		InputTokens:    inputTokens,
+		OutputTokens:   outputTokens,
+		TotalTokens:    totalTokens,
+		FoundCompleted: state.Completed,
+		FoundUsage:     inputTokens > 0 || outputTokens > 0 || totalTokens > 0,
+	}, outputTextAcc.Text(), s.estimatedPromptTokens, s.BaseModel)
+	inputTokens = estimated.InputTokens
+	outputTokens = estimated.OutputTokens
+	totalTokens = estimated.TotalTokens
+	if inputTokens > 0 || outputTokens > 0 {
+		log.Debugf("stream usage final input=%d output=%d total=%d model=%s account=%s", inputTokens, outputTokens, totalTokens, s.BaseModel, s.account.GetEmail())
 	}
 	if inputTokens > 0 || outputTokens > 0 {
 		s.account.RecordUsage(inputTokens, outputTokens, totalTokens)
@@ -466,6 +489,9 @@ func (s *CodexResponsesStream) PumpRawSSE(w io.Writer, flush func()) error {
 	streamStart := time.Now()
 	// 仅统计经 w 写入的 SSE 响应体字节；与 fasthttp SetBodyStreamWriter 一致，状态行/响应头不在此 Writer 上。
 	sseBodyBytes := 0
+	var lineBuf []byte
+	usage := translator.ResponseUsage{}
+	outputTextAcc := translator.NewResponseOutputTextAccumulator()
 	var pumpErr error
 	pumpCtx := context.Background()
 
@@ -474,6 +500,19 @@ func (s *CodexResponsesStream) PumpRawSSE(w io.Writer, flush func()) error {
 		for {
 			n, readErr := s.body.Read(buf)
 			if n > 0 {
+				lineBuf = append(lineBuf, buf[:n]...)
+				for {
+					idx := bytes.IndexByte(lineBuf, '\n')
+					if idx < 0 {
+						break
+					}
+					line := append([]byte(nil), lineBuf[:idx]...)
+					lineBuf = lineBuf[idx+1:]
+					if extracted := translator.ExtractResponseUsageFromSSELine(line); extracted.FoundCompleted {
+						usage = extracted
+					}
+					outputTextAcc.AddSSELine(line)
+				}
 				if s.debugUpstreamStream {
 					ae := ""
 					if s.account != nil {
@@ -491,7 +530,18 @@ func (s *CodexResponsesStream) PumpRawSSE(w io.Writer, flush func()) error {
 			}
 			if readErr != nil {
 				if readErr == io.EOF {
+					if len(lineBuf) > 0 {
+						if extracted := translator.ExtractResponseUsageFromSSELine(lineBuf); extracted.FoundCompleted {
+							usage = extracted
+						}
+						outputTextAcc.AddSSELine(lineBuf)
+						lineBuf = nil
+					}
 					if sseBodyBytes > 0 {
+						usage = EstimateUsageWithFallback(usage, outputTextAcc.Text(), s.estimatedPromptTokens, s.BaseModel)
+						if usage.FoundUsage && (usage.InputTokens > 0 || usage.OutputTokens > 0) {
+							s.account.RecordUsage(usage.InputTokens, usage.OutputTokens, usage.TotalTokens)
+						}
 						s.account.RecordSuccess()
 						log.Infof("req summary responses-stream model=%s account=%s attempts=%d convert=%v upstream=%v total=%v", s.BaseModel, s.account.GetEmail(), s.Attempts, s.ConvertDur, s.SendDur, time.Since(streamStart))
 						return nil
@@ -609,21 +659,38 @@ func (e *Executor) RunCodexStreamWithOpenBridges(octx context.Context, rc RetryC
 
 // CodexCompactStream /responses/compact 成功后的响应（含待透传头与 Body）。
 type CodexCompactStream struct {
-	Resp       *http.Response
-	Account    *auth.Account
-	Attempts   int
-	BaseModel  string
-	ConvertDur time.Duration
-	SendDur    time.Duration
+	Resp                  *http.Response
+	Account               *auth.Account
+	Attempts              int
+	BaseModel             string
+	ConvertDur            time.Duration
+	SendDur               time.Duration
+	estimatedPromptTokens int64
+	usage                 translator.ResponseUsage
 }
 
 // PumpBody 透传 compact 响应体；成功读完时由调用方 RecordSuccess。
 func (s *CodexCompactStream) PumpBody(w io.Writer, flush func()) error {
 	defer func() { _ = s.Resp.Body.Close() }()
 	buf := make([]byte, httpBufferSize)
+	var lineBuf []byte
+	outputTextAcc := translator.NewResponseOutputTextAccumulator()
 	for {
 		n, err := s.Resp.Body.Read(buf)
 		if n > 0 {
+			lineBuf = append(lineBuf, buf[:n]...)
+			for {
+				idx := bytes.IndexByte(lineBuf, '\n')
+				if idx < 0 {
+					break
+				}
+				line := append([]byte(nil), lineBuf[:idx]...)
+				lineBuf = lineBuf[idx+1:]
+				if usage := translator.ExtractResponseUsageFromSSELine(line); usage.FoundCompleted {
+					s.usage = usage
+				}
+				outputTextAcc.AddSSELine(line)
+			}
 			if _, werr := w.Write(buf[:n]); werr != nil {
 				return werr
 			}
@@ -633,6 +700,14 @@ func (s *CodexCompactStream) PumpBody(w io.Writer, flush func()) error {
 		}
 		if err != nil {
 			if err == io.EOF {
+				if len(lineBuf) > 0 {
+					if usage := translator.ExtractResponseUsageFromSSELine(lineBuf); usage.FoundCompleted {
+						s.usage = usage
+					}
+					outputTextAcc.AddSSELine(lineBuf)
+					lineBuf = nil
+				}
+				s.usage = EstimateUsageWithFallback(s.usage, outputTextAcc.Text(), s.estimatedPromptTokens, s.BaseModel)
 				return nil
 			}
 			return wrapReadErr(err)
@@ -640,6 +715,9 @@ func (s *CodexCompactStream) PumpBody(w io.Writer, flush func()) error {
 	}
 }
 
-func estimateTokensFromOutput(model string) int64 {
-	return 0
+func (s *CodexCompactStream) Usage() translator.ResponseUsage {
+	if s == nil {
+		return translator.ResponseUsage{}
+	}
+	return s.usage
 }

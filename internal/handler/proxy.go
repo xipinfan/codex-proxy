@@ -21,6 +21,7 @@ import (
 	"codex-proxy/internal/auth"
 	"codex-proxy/internal/executor"
 	"codex-proxy/internal/thinking"
+	"codex-proxy/internal/translator"
 
 	fasthttprouter "github.com/fasthttp/router"
 	"github.com/fasthttp/websocket"
@@ -1176,6 +1177,8 @@ func (h *ProxyHandler) pumpSSEToWSSession(s *executor.CodexResponsesStream, sess
 	hasContent := false
 	flushed := false
 	var buffer [][]byte
+	usage := translator.ResponseUsage{}
+	outputTextAcc := translator.NewResponseOutputTextAccumulator()
 
 	scanner := bufio.NewScanner(s.Body())
 	scanner.Buffer(make([]byte, scannerInitSize), scannerMaxSize)
@@ -1185,6 +1188,10 @@ func (h *ProxyHandler) pumpSSEToWSSession(s *executor.CodexResponsesStream, sess
 		if !bytes.HasPrefix(line, []byte("data:")) {
 			continue
 		}
+		if extracted := translator.ExtractResponseUsageFromSSELine(line); extracted.FoundCompleted {
+			usage = extracted
+		}
+		outputTextAcc.AddSSELine(line)
 		payload := bytes.TrimSpace(line[5:])
 		if len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) {
 			continue
@@ -1245,6 +1252,10 @@ func (h *ProxyHandler) pumpSSEToWSSession(s *executor.CodexResponsesStream, sess
 
 	if !hasContent {
 		return executor.ErrEmptyResponse
+	}
+	usage = executor.EstimateUsageWithFallback(usage, outputTextAcc.Text(), s.EstimatedPromptTokens(), s.BaseModel)
+	if usage.FoundUsage && (usage.InputTokens > 0 || usage.OutputTokens > 0) {
+		s.Account().RecordUsage(usage.InputTokens, usage.OutputTokens, usage.TotalTokens)
 	}
 	s.Account().RecordSuccess()
 	return nil
@@ -1308,6 +1319,9 @@ func (h *ProxyHandler) handleResponsesCompact(ctx *fasthttp.RequestCtx) {
 			if execErr := compact.PumpBody(newStreamBufWriter(w), flush); execErr != nil {
 				log.Errorf("compact stream pump: %v", execErr)
 				return
+			}
+			if usage := compact.Usage(); usage.FoundUsage && (usage.InputTokens > 0 || usage.OutputTokens > 0) {
+				compact.Account.RecordUsage(usage.InputTokens, usage.OutputTokens, usage.TotalTokens)
 			}
 			compact.Account.RecordSuccess()
 			RecordRequest()

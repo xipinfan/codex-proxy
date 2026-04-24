@@ -68,26 +68,26 @@ export function AccountDetailDrawer({ account, open, onClose, onDeleteAccount }:
               </div>
               <div className="rounded-[18px] bg-[rgba(255,255,255,0.72)] px-3 py-2">
                 <p className="text-xs text-[color:var(--text-secondary)]">累计</p>
-                <p className="mt-1 text-lg font-semibold">{formatTokenFull(account.usage.lifetimeTotalTokens || account.usage.totalTokens)}</p>
+                <p className="mt-1 text-lg font-semibold">{formatTokenFull(account.usage.lifetimeTotalTokens)}</p>
               </div>
             </div>
             <div className="mt-4 grid gap-3 sm:grid-cols-3">
               <div>
                 <p className="text-xs text-[color:var(--text-secondary)]">完成次数</p>
-                <p className="mt-1 text-xl font-semibold">{formatNumber(account.usage.lifetimeRequestCount || account.usage.totalCompletions)}</p>
+                <p className="mt-1 text-xl font-semibold">{formatNumber(account.usage.lifetimeRequestCount)}</p>
               </div>
               <div>
                 <p className="text-xs text-[color:var(--text-secondary)]">输入</p>
-                <p className="mt-1 text-xl font-semibold">{formatNumber(account.usage.lifetimeInputTokens || account.usage.inputTokens)}</p>
+                <p className="mt-1 text-xl font-semibold">{formatNumber(account.usage.lifetimeInputTokens)}</p>
               </div>
               <div>
                 <p className="text-xs text-[color:var(--text-secondary)]">输出</p>
-                <p className="mt-1 text-xl font-semibold">{formatNumber(account.usage.lifetimeOutputTokens || account.usage.outputTokens)}</p>
+                <p className="mt-1 text-xl font-semibold">{formatNumber(account.usage.lifetimeOutputTokens)}</p>
               </div>
             </div>
             <div className="mt-4 rounded-[22px] bg-[rgba(32,25,22,0.04)] px-4 py-3">
               <p className="text-xs font-semibold tracking-[0.18em] text-[color:var(--text-secondary)]">令牌总量</p>
-              <p className="mt-1 text-2xl font-semibold">{formatNumber(account.usage.lifetimeTotalTokens || account.usage.totalTokens)}</p>
+              <p className="mt-1 text-2xl font-semibold">{formatNumber(account.usage.lifetimeTotalTokens)}</p>
               <p className="mt-1 text-xs text-[color:var(--text-secondary)]">统计基于系统记录到的 usage 聚合，不等同于 OpenAI 官方账单。</p>
             </div>
           </Card>

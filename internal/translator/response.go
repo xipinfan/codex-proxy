@@ -18,6 +18,174 @@ import (
 
 var dataPrefix = []byte("data:")
 
+type ResponseUsage struct {
+	InputTokens    int64
+	OutputTokens   int64
+	TotalTokens    int64
+	FoundCompleted bool
+	FoundUsage     bool
+}
+
+func ExtractResponseUsageFromCompletedJSON(rawJSON []byte) ResponseUsage {
+	root := gjson.ParseBytes(rawJSON)
+	if root.Get("type").String() != "response.completed" {
+		return ResponseUsage{}
+	}
+
+	out := ResponseUsage{FoundCompleted: true}
+	usage := root.Get("response.usage")
+	if !usage.Exists() {
+		return out
+	}
+
+	out.FoundUsage = true
+	out.InputTokens = usage.Get("input_tokens").Int()
+	out.OutputTokens = usage.Get("output_tokens").Int()
+	out.TotalTokens = usage.Get("total_tokens").Int()
+	if out.TotalTokens <= 0 && (out.InputTokens > 0 || out.OutputTokens > 0) {
+		out.TotalTokens = out.InputTokens + out.OutputTokens
+	}
+	return out
+}
+
+func ExtractResponseUsageFromSSELine(rawLine []byte) ResponseUsage {
+	if !bytes.HasPrefix(bytes.TrimSpace(rawLine), dataPrefix) {
+		return ResponseUsage{}
+	}
+	rawJSON := bytes.TrimSpace(bytes.TrimSpace(rawLine)[5:])
+	if len(rawJSON) == 0 {
+		return ResponseUsage{}
+	}
+	return ExtractResponseUsageFromCompletedJSON(rawJSON)
+}
+
+func ExtractResponseUsageFromResponseObjectJSON(rawJSON []byte) ResponseUsage {
+	root := gjson.ParseBytes(rawJSON)
+	usage := root.Get("usage")
+	if !usage.Exists() {
+		return ResponseUsage{}
+	}
+	out := ResponseUsage{
+		FoundCompleted: true,
+		FoundUsage:     true,
+		InputTokens:    usage.Get("input_tokens").Int(),
+		OutputTokens:   usage.Get("output_tokens").Int(),
+		TotalTokens:    usage.Get("total_tokens").Int(),
+	}
+	if out.TotalTokens <= 0 && (out.InputTokens > 0 || out.OutputTokens > 0) {
+		out.TotalTokens = out.InputTokens + out.OutputTokens
+	}
+	return out
+}
+
+func ExtractResponseOutputTextFromSSELine(rawLine []byte) string {
+	if !bytes.HasPrefix(bytes.TrimSpace(rawLine), dataPrefix) {
+		return ""
+	}
+	rawJSON := bytes.TrimSpace(bytes.TrimSpace(rawLine)[5:])
+	if len(rawJSON) == 0 {
+		return ""
+	}
+	root := gjson.ParseBytes(rawJSON)
+	switch root.Get("type").String() {
+	case "response.output_text.delta",
+		"response.reasoning_summary_text.delta",
+		"response.reasoning.delta",
+		"response.reasoning_text.delta",
+		"response.function_call_arguments.delta":
+		return root.Get("delta").String()
+	case "response.reasoning_summary_text.done", "response.reasoning_text.done":
+		return root.Get("text").String()
+	case "response.function_call_arguments.done":
+		return root.Get("arguments").String()
+	case "response.content_part.added":
+		part := root.Get("part")
+		if part.Get("type").String() == "reasoning_text" {
+			return part.Get("text").String()
+		}
+	case "response.output_item.done":
+		item := root.Get("item")
+		if item.Get("type").String() == "function_call" {
+			return item.Get("arguments").String()
+		}
+	}
+	return ""
+}
+
+func ExtractResponseOutputTextFromCompletedJSON(rawJSON []byte) string {
+	root := gjson.ParseBytes(rawJSON)
+	if root.Get("type").String() != "response.completed" {
+		return ""
+	}
+	return ExtractResponseOutputTextFromResponseObjectJSON([]byte(root.Get("response").Raw))
+}
+
+func ExtractResponseOutputTextFromResponseObjectJSON(rawJSON []byte) string {
+	root := gjson.ParseBytes(rawJSON)
+	var sb strings.Builder
+	appendText := func(s string) {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			return
+		}
+		if sb.Len() > 0 {
+			sb.WriteByte('\n')
+		}
+		sb.WriteString(s)
+	}
+
+	appendText(root.Get("output_text").String())
+	output := root.Get("output")
+	if !output.IsArray() {
+		return sb.String()
+	}
+	for _, item := range output.Array() {
+		switch item.Get("type").String() {
+		case "message":
+			if content := item.Get("content"); content.IsArray() {
+				for _, ci := range content.Array() {
+					ct := ci.Get("type").String()
+					if ct == "output_text" || ct == "text" || ct == "reasoning_text" {
+						appendText(ci.Get("text").String())
+					}
+				}
+			}
+		case "reasoning":
+			if summary := item.Get("summary"); summary.IsArray() {
+				for _, si := range summary.Array() {
+					if si.Get("type").String() == "summary_text" {
+						appendText(si.Get("text").String())
+					}
+				}
+			}
+			if content := item.Get("content"); content.IsArray() {
+				for _, ci := range content.Array() {
+					ct := ci.Get("type").String()
+					if ct == "reasoning_text" || ct == "text" {
+						appendText(ci.Get("text").String())
+					}
+				}
+			}
+			appendText(item.Get("text").String())
+		case "reasoning_text":
+			appendText(item.Get("text").String())
+			if content := item.Get("content"); content.IsArray() {
+				for _, ci := range content.Array() {
+					appendText(ci.Get("text").String())
+				}
+			}
+		case "content_part":
+			part := item.Get("part")
+			if part.Get("type").String() == "reasoning_text" {
+				appendText(part.Get("text").String())
+			}
+		case "function_call":
+			appendText(item.Get("arguments").String())
+		}
+	}
+	return sb.String()
+}
+
 /**
  * StreamState 流式响应转换的状态对象
  * 在多次调用之间维护上下文（如 response ID、函数调用索引等）

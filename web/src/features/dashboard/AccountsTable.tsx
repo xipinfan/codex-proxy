@@ -97,8 +97,8 @@ export function AccountsTable({ accounts, selectedAccountId, onSelect }: Account
             <td className="px-4 py-4 text-[color:var(--text-secondary)]">{formatNumber(account.totalRequests ?? 0)}</td>
             <td className="px-4 py-4 text-[color:var(--text-secondary)]">{formatNumber(account.totalErrors ?? 0)}</td>
             <td className="px-4 py-4 text-[color:var(--text-secondary)]">
-              <p className="font-medium text-[color:var(--text-primary)]">{formatTokenCompact(account.usage.todayTotalTokens || 0)}</p>
-              <p className="mt-1 text-xs text-[color:var(--text-secondary)]">累计 {formatTokenCompact(account.usage.lifetimeTotalTokens || account.usage.totalTokens)}</p>
+              <p className="font-medium text-[color:var(--text-primary)]">{formatTokenCompact(account.usage.todayTotalTokens)}</p>
+              <p className="mt-1 text-xs text-[color:var(--text-secondary)]">累计 {formatTokenCompact(account.usage.lifetimeTotalTokens)}</p>
             </td>
             <td className="px-4 py-4 text-[color:var(--text-secondary)]">{formatDateTime(account.lastUsedAt)}</td>
             <td className="px-4 py-4 text-[color:var(--text-secondary)]">{formatDateTime(account.lastRefreshedAt)}</td>
