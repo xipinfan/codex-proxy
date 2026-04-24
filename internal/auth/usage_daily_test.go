@@ -93,6 +93,27 @@ func TestUsageOverviewAggregatesByWindows(t *testing.T) {
 	}
 }
 
+func TestNormalizeUsageDateValue(t *testing.T) {
+	cases := []struct {
+		name string
+		in   any
+		want string
+	}{
+		{name: "plain string", in: "2026-04-25", want: "2026-04-25"},
+		{name: "rfc3339 string", in: "2026-04-25T00:00:00Z", want: "2026-04-25"},
+		{name: "timestamp string", in: "2026-04-25 00:00:00+00:00", want: "2026-04-25"},
+		{name: "bytes", in: []byte("2026-04-25T00:00:00Z"), want: "2026-04-25"},
+		{name: "time", in: time.Date(2026, 4, 25, 0, 0, 0, 0, time.UTC), want: "2026-04-25"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := normalizeUsageDateValue(tc.in); got != tc.want {
+				t.Fatalf("normalizeUsageDateValue(%T) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestAttachAccountUsageRecorderPersistsRecordUsage(t *testing.T) {
 	m := newUsageTestManager(t)
 	now := time.Date(2026, 4, 23, 12, 0, 0, 0, time.UTC)

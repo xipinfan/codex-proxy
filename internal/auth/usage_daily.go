@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"fmt"
 	"strings"
 	"time"
 
@@ -187,10 +188,15 @@ func (m *Manager) usageOverview(accountKeySet accountUsageKeySet, now time.Time)
 	defer rows.Close()
 
 	for rows.Next() {
-		var accountKey, usageDate string
+		var accountKey string
+		var usageDateRaw any
 		var requestCount, inputTokens, outputTokens, totalTokens int64
-		if scanErr := rows.Scan(&accountKey, &usageDate, &requestCount, &inputTokens, &outputTokens, &totalTokens); scanErr != nil {
+		if scanErr := rows.Scan(&accountKey, &usageDateRaw, &requestCount, &inputTokens, &outputTokens, &totalTokens); scanErr != nil {
 			return out, perAccount, scanErr
+		}
+		usageDate := normalizeUsageDateValue(usageDateRaw)
+		if usageDate == "" {
+			return out, perAccount, fmt.Errorf("unexpected usage_date value %T", usageDateRaw)
 		}
 		bucket := UsageBucket{
 			InputTokens:  inputTokens,
@@ -281,6 +287,41 @@ func usageAccountKeySetFromAccounts(accounts []*Account) accountUsageKeySet {
 
 func UsageAccountKeyFromStats(stats AccountStats) string {
 	return usageAccountKey(stats.AccountID, stats.Email)
+}
+
+func normalizeUsageDateValue(v any) string {
+	switch x := v.(type) {
+	case nil:
+		return ""
+	case string:
+		return normalizeUsageDateString(x)
+	case []byte:
+		return normalizeUsageDateString(string(x))
+	case time.Time:
+		return x.Format("2006-01-02")
+	default:
+		return normalizeUsageDateString(fmt.Sprint(v))
+	}
+}
+
+func normalizeUsageDateString(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) >= 10 && s[4] == '-' && s[7] == '-' {
+		return s[:10]
+	}
+	layouts := []string{
+		time.RFC3339Nano,
+		time.RFC3339,
+		"2006-01-02 15:04:05.999999-07:00",
+		"2006-01-02 15:04:05.999999",
+		"2006-01-02 15:04:05",
+	}
+	for _, layout := range layouts {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t.Format("2006-01-02")
+		}
+	}
+	return s
 }
 
 func ApplyUsageOverview(stats *UsageStats, overview UsageOverview) {
