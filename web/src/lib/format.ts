@@ -9,25 +9,26 @@ export function formatNumber(value: number): string {
   return new Intl.NumberFormat('zh-CN').format(value);
 }
 
+function trimFixed(value: number, fractionDigits: number): string {
+  return value.toFixed(fractionDigits).replace(/\.0+$/, '').replace(/(\.\d*[1-9])0+$/, '$1');
+}
+
 export function formatCompactNumber(value: number): string {
-  return new Intl.NumberFormat('zh-CN', {
-    notation: 'compact',
-    maximumFractionDigits: value >= 100 ? 0 : 1,
-  }).format(value);
+  const abs = Math.abs(value);
+  if (abs < 10_000) {
+    return formatNumber(value);
+  }
+
+  if (abs < 100_000_000) {
+    const fractionDigits = abs >= 100_000 ? (abs >= 1_000_000 ? 1 : 0) : 1;
+    return `${trimFixed(value / 10_000, fractionDigits)}万`;
+  }
+
+  return `${trimFixed(value / 100_000_000, 2)}亿`;
 }
 
 export function formatTokenCompact(value: number): string {
-  const abs = Math.abs(value);
-  if (abs < 1_000) {
-    return formatNumber(value);
-  }
-  if (abs < 1_000_000) {
-    return `${(value / 1_000).toFixed(abs >= 100_000 ? 0 : 1)}K`;
-  }
-  if (abs < 1_000_000_000) {
-    return `${(value / 1_000_000).toFixed(abs >= 100_000_000 ? 0 : 1)}M`;
-  }
-  return `${(value / 1_000_000_000).toFixed(abs >= 100_000_000_000 ? 0 : 1)}B`;
+  return formatCompactNumber(value);
 }
 
 export function formatTokenFull(value: number): string {

@@ -10,24 +10,33 @@ interface TokenOverviewDrawerProps {
   accounts: AccountView[];
 }
 
-function BucketPanel({ label, bucket }: { label: string; bucket: TokenBucketView }) {
+function TokenMetricRow({ label, value, compact = false }: { label: string; value: number; compact?: boolean }) {
+  const fullValue = formatTokenFull(value);
   return (
-    <Card className="rounded-[22px] bg-white/72 shadow-none">
+    <div className="flex min-w-0 items-center justify-between gap-3">
+      <span className="shrink-0 whitespace-nowrap">{label}</span>
+      <span className="min-w-0 truncate whitespace-nowrap text-right font-medium tabular-nums text-[color:var(--text-primary)]" title={fullValue}>
+        {compact ? formatTokenCompact(value) : fullValue}
+      </span>
+    </div>
+  );
+}
+
+function BucketPanel({ label, bucket, compact = false }: { label: string; bucket: TokenBucketView; compact?: boolean }) {
+  const fullTotal = formatTokenFull(bucket.totalTokens);
+  return (
+    <Card className={`${compact ? 'p-4' : ''} min-w-0 rounded-[22px] bg-white/72 shadow-none`}>
       <p className="text-xs font-semibold tracking-[0.18em] text-[color:var(--text-secondary)]">{label}</p>
-      <p className="mt-2 text-2xl font-semibold">{formatTokenFull(bucket.totalTokens)}</p>
-      <div className="mt-3 grid gap-2 text-sm text-[color:var(--text-secondary)]">
-        <div className="flex items-center justify-between">
-          <span>输入</span>
-          <span className="font-medium text-[color:var(--text-primary)]">{formatTokenFull(bucket.inputTokens)}</span>
-        </div>
-        <div className="flex items-center justify-between">
-          <span>输出</span>
-          <span className="font-medium text-[color:var(--text-primary)]">{formatTokenFull(bucket.outputTokens)}</span>
-        </div>
-        <div className="flex items-center justify-between">
-          <span>请求数</span>
-          <span className="font-medium text-[color:var(--text-primary)]">{formatTokenFull(bucket.requestCount)}</span>
-        </div>
+      <p
+        className={`${compact ? 'text-[1.45rem]' : 'text-2xl'} mt-2 truncate whitespace-nowrap font-semibold tracking-[-0.04em] tabular-nums`}
+        title={fullTotal}
+      >
+        {compact ? formatTokenCompact(bucket.totalTokens) : fullTotal}
+      </p>
+      <div className={`${compact ? 'text-[13px]' : 'text-sm'} mt-3 grid gap-2 text-[color:var(--text-secondary)]`}>
+        <TokenMetricRow label="输入" value={bucket.inputTokens} compact={compact} />
+        <TokenMetricRow label="输出" value={bucket.outputTokens} compact={compact} />
+        <TokenMetricRow label="请求数" value={bucket.requestCount} compact={compact} />
       </div>
     </Card>
   );
@@ -62,9 +71,9 @@ export function TokenOverviewDrawer({ open, onClose, summary, accounts }: TokenO
         <BucketPanel label="今日" bucket={overview.today} />
 
         <div className="grid gap-3 sm:grid-cols-3">
-          <BucketPanel label="近 7 日" bucket={overview.sevenDays} />
-          <BucketPanel label="近 30 日" bucket={overview.thirtyDays} />
-          <BucketPanel label="累计" bucket={overview.lifetime} />
+          <BucketPanel label="近 7 日" bucket={overview.sevenDays} compact />
+          <BucketPanel label="近 30 日" bucket={overview.thirtyDays} compact />
+          <BucketPanel label="累计" bucket={overview.lifetime} compact />
         </div>
 
         <Card className="rounded-[22px] bg-white/72 shadow-none">
