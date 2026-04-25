@@ -2,7 +2,7 @@ import { Badge } from '../../components/ui/Badge';
 import { Button } from '../../components/ui/Button';
 import { Card } from '../../components/ui/Card';
 import { Drawer } from '../../components/ui/Drawer';
-import { formatDateTime, formatNumber, formatTokenFull } from '../../lib/format';
+import { formatAvailabilityReason, formatDateTime, formatDurationMs, formatNumber, formatStatusLabel, formatTokenFull } from '../../lib/format';
 import type { AccountView } from '../../lib/types';
 import { QuotaPanel } from './QuotaPanel';
 import { useState } from 'react';
@@ -113,6 +113,24 @@ export function AccountDetailDrawer({ account, open, onClose, onDeleteAccount }:
                 <span>最近使用</span>
                 <span className="font-medium text-[color:var(--text-primary)]">{formatDateTime(account.lastUsedAt)}</span>
               </div>
+              <div className="flex items-center justify-between">
+                <span>调度状态</span>
+                <span className="font-medium text-[color:var(--text-primary)]">
+                  {(account.pickable ?? true) ? '可调度' : formatAvailabilityReason(account.unavailableReason ?? '')}
+                </span>
+              </div>
+              {account.storedStatus && account.storedStatus !== account.status ? (
+                <div className="flex items-center justify-between">
+                  <span>内部状态</span>
+                  <span className="font-medium text-[color:var(--text-primary)]">{formatStatusLabel(account.storedStatus)}</span>
+                </div>
+              ) : null}
+              {(account.cooldownRemainingMs ?? 0) > 0 ? (
+                <div className="flex items-center justify-between">
+                  <span>冷却剩余</span>
+                  <span className="font-medium text-[color:var(--text-primary)]">{formatDurationMs(account.cooldownRemainingMs ?? 0)}</span>
+                </div>
+              ) : null}
               <div className="rounded-[20px] border border-[color:var(--border-soft)] bg-[rgba(255,255,255,0.76)] px-4 py-3">
                 <p className="text-xs font-semibold tracking-[0.18em]">停用原因</p>
                 <p className="mt-1 text-sm text-[color:var(--text-primary)]">{account.disableReason || '未报告停用原因'}</p>

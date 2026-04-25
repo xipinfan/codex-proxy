@@ -118,6 +118,10 @@ function toAccountView(input: AccountStatsResponse): AccountView {
     id: accountId,
     email,
     status: toStatus(input?.status),
+    storedStatus: toStatus(input?.stored_status),
+    pickable: input?.pickable ?? true,
+    unavailableReason: String(input?.unavailable_reason ?? ''),
+    cooldownRemainingMs: toNumber(input?.cooldown_remaining_ms),
     planType: String(input?.plan_type ?? ''),
     disableReason: String(input?.disable_reason ?? ''),
     totalRequests: toNumber(input?.total_requests),
@@ -170,5 +174,6 @@ export function adaptStatsResponse(input: StatsResponse): StatsView {
     summary: toSummaryView(input?.summary),
     accounts: Array.isArray(input?.accounts) ? input.accounts.map(toAccountView) : [],
     pagination: toPaginationView(input?.pagination),
+    serverTime: toDateString(input?.server_time),
   };
 }

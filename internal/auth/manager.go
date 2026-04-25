@@ -1094,13 +1094,13 @@ func (m *Manager) PickRecentlySuccessful(model string, excluded map[string]bool)
 	_ = model
 	allAccounts := *m.accountsPtr.Load()
 	/* 按 lastSuccessUnixMs 线性扫描，等价于原 sort 后取最近，避免 O(N log N) */
+	nowMs := time.Now().UnixMilli()
 	var bestAll *Account
 	var bestAllMs int64 = -1
 	var bestOpen *Account
 	var bestOpenMs int64 = -1
 	for _, acc := range allAccounts {
-		st := AccountStatus(acc.atomicStatus.Load())
-		if st == StatusDisabled || st == StatusCooldown {
+		if !accountPickableAt(nowMs, acc) {
 			continue
 		}
 		ms := acc.lastSuccessUnixMs.Load()
@@ -1123,8 +1123,7 @@ func (m *Manager) PickRecentlySuccessful(model string, excluded map[string]bool)
 
 	if bestAll == nil {
 		for _, acc := range allAccounts {
-			st := AccountStatus(acc.atomicStatus.Load())
-			if st == StatusDisabled || st == StatusCooldown {
+			if !accountPickableAt(nowMs, acc) {
 				continue
 			}
 			return acc, nil

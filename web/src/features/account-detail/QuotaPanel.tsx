@@ -2,14 +2,14 @@ import { formatDateTime, formatNumber, formatPercent } from '../../lib/format';
 import { parseQuotaDetails } from '../../lib/quota';
 import type { AccountView } from '../../lib/types';
 
-function deriveQuotaPercent(account: AccountView): number | null {
+function deriveQuotaAvailablePercent(account: AccountView): number | null {
   const primaryWindow = parseQuotaDetails(account.quota?.rawData).primaryWindow;
   if (primaryWindow) {
-    return primaryWindow.usedPercent;
+    return primaryWindow.availablePercent;
   }
 
   if (account.quotaExhausted) {
-    return 100;
+    return 0;
   }
 
   return null;
@@ -26,7 +26,7 @@ export function QuotaPanel({ account }: { account: AccountView }) {
     );
   }
 
-  const usedPercent = deriveQuotaPercent(account);
+  const availablePercent = deriveQuotaAvailablePercent(account);
   const details = parseQuotaDetails(account.quota.rawData);
 
   return (
@@ -37,12 +37,17 @@ export function QuotaPanel({ account }: { account: AccountView }) {
           <p className="text-xs font-semibold tracking-[0.22em] text-[color:var(--text-secondary)]">额度窗口</p>
           <p className="mt-1 text-sm text-[color:var(--text-secondary)]">用于判断账号是否还能继续参与调度</p>
         </div>
-        <span className="rounded-full bg-white/70 px-3 py-1 text-sm font-semibold text-[color:var(--text-primary)]">{formatPercent(usedPercent)}</span>
+        <span className="rounded-full bg-white/70 px-3 py-1 text-sm font-semibold text-[color:var(--text-primary)]">可用 {formatPercent(availablePercent)}</span>
       </div>
-      <div className="relative mt-4 h-3 overflow-hidden rounded-full bg-[rgba(59,184,197,0.12)]">
+      <div className="relative mt-4 h-1.5 overflow-hidden rounded-full bg-[rgba(122,91,62,0.12)]">
         <div
-          className="h-full rounded-full bg-gradient-to-r from-[#3bb8c5] to-[#f39239] transition-[width]"
-          style={{ width: `${usedPercent ?? 12}%` }}
+          role="progressbar"
+          aria-label="额度窗口 可用额度"
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={availablePercent ?? 0}
+          className="h-full rounded-full bg-gradient-to-r from-[#3bb8c5] to-[#f39239] transition-[width] duration-300"
+          style={{ width: `${availablePercent ?? 18}%` }}
         />
       </div>
       {details.windows.length > 0 ? (
@@ -53,8 +58,16 @@ export function QuotaPanel({ account }: { account: AccountView }) {
                 <p className="text-xs font-semibold tracking-[0.16em]">{window.label}</p>
                 <span className="font-semibold text-[color:var(--text-primary)]">可用 {formatPercent(window.availablePercent)}</span>
               </div>
-              <div className="mt-3 h-2 overflow-hidden rounded-full bg-[rgba(59,184,197,0.12)]">
-                <div className="h-full rounded-full bg-gradient-to-r from-[#3bb8c5] to-[#f39239]" style={{ width: `${window.usedPercent}%` }} />
+              <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-[rgba(122,91,62,0.12)]">
+                <div
+                  role="progressbar"
+                  aria-label={`${window.label} 可用额度`}
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  aria-valuenow={window.availablePercent}
+                  className="h-full rounded-full bg-gradient-to-r from-[#3bb8c5] to-[#f39239] transition-[width] duration-300"
+                  style={{ width: `${window.availablePercent}%` }}
+                />
               </div>
               <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
                 <span>已用 {formatPercent(window.usedPercent)}</span>

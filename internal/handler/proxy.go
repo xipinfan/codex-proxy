@@ -688,13 +688,14 @@ func (h *ProxyHandler) handleChatCompletions(ctx *fasthttp.RequestCtx) {
  */
 func (h *ProxyHandler) handleStats(ctx *fasthttp.RequestCtx) {
 	args := ctx.QueryArgs()
+	now := time.Now()
 	pageMode := len(args.Peek("page")) > 0 || len(args.Peek("page_size")) > 0 || len(args.Peek("q")) > 0 || len(args.Peek("include_quota")) > 0
 	query := strings.ToLower(strings.TrimSpace(string(args.Peek("q"))))
 	includeQuota := queryBoolArg(args, "include_quota")
 	accounts := h.manager.GetAccounts()
 	active, cooldown, disabled := 0, 0, 0
 	var totalInputTokens, totalOutputTokens int64
-	usageOverview, accountUsageOverview, usageErr := h.manager.UsageOverviewForAccounts(accounts, time.Now())
+	usageOverview, accountUsageOverview, usageErr := h.manager.UsageOverviewForAccounts(accounts, now)
 	if usageErr != nil {
 		log.Warnf("加载 usage 聚合概览失败: %v", usageErr)
 	}
@@ -737,7 +738,8 @@ func (h *ProxyHandler) handleStats(ctx *fasthttp.RequestCtx) {
 				"total_output_tokens": totalOutputTokens,
 				"token_overview":      usageOverview,
 			},
-			"accounts": stats,
+			"accounts":    stats,
+			"server_time": now,
 		})
 		return
 	}
@@ -803,7 +805,8 @@ func (h *ProxyHandler) handleStats(ctx *fasthttp.RequestCtx) {
 			"total_output_tokens": totalOutputTokens,
 			"token_overview":      usageOverview,
 		},
-		"accounts": stats,
+		"accounts":    stats,
+		"server_time": now,
 		"pagination": statsPagination{
 			Page:          page,
 			PageSize:      pageSize,

@@ -277,19 +277,12 @@ func sortByUsedPercent(accounts []*Account) {
  * accountPickableAt 与 filterAvailable 单账号语义一致，供 RR 缓存出号前二次校验
  */
 func accountPickableAt(nowMs int64, acc *Account) bool {
-	status := AccountStatus(acc.atomicStatus.Load())
-	switch status {
-	case StatusDisabled:
-		return false
-	case StatusCooldown:
-		if nowMs < acc.atomicCooldownMs.Load() {
-			return false
-		}
-	}
-	if expMs := acc.accessExpireUnixMs.Load(); expMs > 0 && nowMs >= expMs-pickAvoidTokenExpireMarginMs {
-		return false
-	}
-	return true
+	return availabilityFromState(
+		nowMs,
+		AccountStatus(acc.atomicStatus.Load()),
+		acc.atomicCooldownMs.Load(),
+		acc.accessExpireUnixMs.Load(),
+	).Pickable
 }
 
 /**

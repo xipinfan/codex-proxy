@@ -65,4 +65,26 @@ describe('adaptStatsResponse', () => {
     expect(adapted.accounts[0].usage.lifetimeTotalTokens).toBe(0);
     expect(adapted.accounts[0].usage.lifetimeRequestCount).toBe(0);
   });
+
+  it('maps account availability fields', () => {
+    const adapted = adaptStatsResponse({
+      server_time: '2026-04-25T10:07:14+08:00',
+      accounts: [
+        {
+          email: 'cooldown-expired@example.com',
+          status: 'active',
+          stored_status: 'cooldown',
+          pickable: true,
+          cooldown_remaining_ms: 0,
+          unavailable_reason: '',
+        },
+      ],
+    });
+
+    expect(adapted.serverTime).toBe('2026-04-25T10:07:14+08:00');
+    expect(adapted.accounts[0].storedStatus).toBe('cooldown');
+    expect(adapted.accounts[0].pickable).toBe(true);
+    expect(adapted.accounts[0].cooldownRemainingMs).toBe(0);
+    expect(adapted.accounts[0].unavailableReason).toBe('');
+  });
 });

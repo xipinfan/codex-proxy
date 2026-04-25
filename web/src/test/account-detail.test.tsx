@@ -12,8 +12,10 @@ describe('AccountDetailDrawer', () => {
     expect(screen.getByText(/额度窗口/i)).toBeInTheDocument();
     expect(screen.getByText(/5 小时额度/i)).toBeInTheDocument();
     expect(screen.getByText(/7 日额度/i)).toBeInTheDocument();
-    expect(screen.getByText(/78%/i)).toBeInTheDocument();
+    expect(screen.getAllByText(/78%/i).length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText(/97%/i)).toBeInTheDocument();
+    expect(screen.getByRole('progressbar', { name: /5 小时额度 可用额度/i })).toHaveAttribute('aria-valuenow', '78');
+    expect(screen.getByRole('progressbar', { name: /7 日额度 可用额度/i })).toHaveAttribute('aria-valuenow', '97');
     expect(screen.getByText(/累计 Token/i)).toBeInTheDocument();
     expect(screen.getAllByText(/5,000/i).length).toBeGreaterThanOrEqual(2);
   });

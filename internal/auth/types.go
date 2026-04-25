@@ -133,6 +133,21 @@ const (
 	StatusDisabled
 )
 
+const (
+	UnavailableReasonNone          = ""
+	UnavailableReasonDisabled      = "disabled"
+	UnavailableReasonCooldown      = "cooldown"
+	UnavailableReasonTokenExpiring = "token_expiring"
+)
+
+type AccountAvailability struct {
+	Status              string
+	StoredStatus        string
+	Pickable            bool
+	UnavailableReason   string
+	CooldownRemainingMs int64
+}
+
 /* 禁用原因编码 */
 const (
 	ReasonNone    = ""
@@ -196,6 +211,10 @@ type AccountStats struct {
 	AccountID           string     `json:"account_id,omitempty"`
 	Email               string     `json:"email"`
 	Status              string     `json:"status"`
+	StoredStatus        string     `json:"stored_status,omitempty"`
+	Pickable            bool       `json:"pickable"`
+	UnavailableReason   string     `json:"unavailable_reason,omitempty"`
+	CooldownRemainingMs int64      `json:"cooldown_remaining_ms"`
 	PlanType            string     `json:"plan_type,omitempty"`
 	DisableReason       string     `json:"disable_reason,omitempty"`
 	TotalRequests       int64      `json:"total_requests"`
@@ -268,23 +287,62 @@ type QuotaInfo struct {
 	CheckedAt  time.Time       `json:"checked_at"`
 }
 
+func accountStatusString(status AccountStatus) string {
+	switch status {
+	case StatusCooldown:
+		return "cooldown"
+	case StatusDisabled:
+		return "disabled"
+	default:
+		return "active"
+	}
+}
+
+func availabilityFromState(nowMs int64, status AccountStatus, cooldownMs, accessExpireMs int64) AccountAvailability {
+	storedStatus := accountStatusString(status)
+	out := AccountAvailability{
+		Status:       storedStatus,
+		StoredStatus: storedStatus,
+		Pickable:     true,
+	}
+
+	switch status {
+	case StatusDisabled:
+		out.Pickable = false
+		out.UnavailableReason = UnavailableReasonDisabled
+		return out
+	case StatusCooldown:
+		if nowMs < cooldownMs {
+			out.Pickable = false
+			out.UnavailableReason = UnavailableReasonCooldown
+			out.CooldownRemainingMs = cooldownMs - nowMs
+			return out
+		}
+		out.Status = "active"
+	}
+
+	if accessExpireMs > 0 && nowMs >= accessExpireMs-pickAvoidTokenExpireMarginMs {
+		out.Pickable = false
+		out.UnavailableReason = UnavailableReasonTokenExpiring
+	}
+	return out
+}
+
+func (a *Account) AvailabilityAt(now time.Time) AccountAvailability {
+	return availabilityFromState(
+		now.UnixMilli(),
+		AccountStatus(a.atomicStatus.Load()),
+		a.atomicCooldownMs.Load(),
+		a.accessExpireUnixMs.Load(),
+	)
+}
+
 /**
  * IsAvailable 检查账号当前是否可用
  * @returns bool - 如果账号状态为 active 或冷却已过则返回 true
  */
 func (a *Account) IsAvailable() bool {
-	/* 使用原子字段无锁判断，避免热路径上的锁竞争 */
-	status := AccountStatus(a.atomicStatus.Load())
-	if status == StatusDisabled {
-		return false
-	}
-	if status == StatusCooldown {
-		cooldownMs := a.atomicCooldownMs.Load()
-		if time.Now().UnixMilli() < cooldownMs {
-			return false
-		}
-	}
-	return true
+	return a.AvailabilityAt(time.Now()).Pickable
 }
 
 /**
@@ -633,13 +691,12 @@ func (a *Account) GetStats() AccountStats {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 
-	statusStr := "active"
-	switch a.Status {
-	case StatusCooldown:
-		statusStr = "cooldown"
-	case StatusDisabled:
-		statusStr = "disabled"
-	}
+	availability := availabilityFromState(
+		time.Now().UnixMilli(),
+		a.Status,
+		a.CooldownUntil.UnixMilli(),
+		a.accessExpireUnixMs.Load(),
+	)
 
 	/* 配额状态：如果已过期则自动恢复 */
 	quotaExhausted := a.QuotaExhausted
@@ -651,7 +708,11 @@ func (a *Account) GetStats() AccountStats {
 	return AccountStats{
 		AccountID:           a.Token.AccountID,
 		Email:               a.Token.Email,
-		Status:              statusStr,
+		Status:              availability.Status,
+		StoredStatus:        availability.StoredStatus,
+		Pickable:            availability.Pickable,
+		UnavailableReason:   availability.UnavailableReason,
+		CooldownRemainingMs: availability.CooldownRemainingMs,
 		PlanType:            a.Token.PlanType,
 		DisableReason:       a.DisableReason,
 		TotalRequests:       a.TotalRequests.Load(),

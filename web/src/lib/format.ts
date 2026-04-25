@@ -61,6 +61,33 @@ export function formatStatusLabel(status: string): string {
   return status ? `未知状态：${status}` : '未知';
 }
 
+export function formatAvailabilityReason(reason: string): string {
+  if (reason === 'cooldown') {
+    return '冷却中';
+  }
+  if (reason === 'disabled') {
+    return '已停用';
+  }
+  if (reason === 'token_expiring') {
+    return '令牌即将过期';
+  }
+  return '可调度';
+}
+
+export function formatDurationMs(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) {
+    return '0 秒';
+  }
+
+  const totalSeconds = Math.ceil(value / 1000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (minutes <= 0) {
+    return `${seconds} 秒`;
+  }
+  return seconds > 0 ? `${minutes} 分 ${seconds} 秒` : `${minutes} 分`;
+}
+
 export function formatPercent(value: number | null): string {
   if (value === null || Number.isNaN(value)) {
     return '待检查';

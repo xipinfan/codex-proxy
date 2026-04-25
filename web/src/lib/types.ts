@@ -68,6 +68,10 @@ export interface AccountView {
   id: string;
   email: string;
   status: AccountStatus | string;
+  storedStatus?: AccountStatus | string;
+  pickable?: boolean;
+  unavailableReason?: string;
+  cooldownRemainingMs?: number;
   planType: string;
   disableReason?: string;
   totalRequests?: number;
@@ -99,6 +103,7 @@ export interface StatsView {
   summary: SummaryView;
   accounts: AccountView[];
   pagination: PaginationView | null;
+  serverTime?: string | null;
 }
 
 export interface OAuthCallbackPayload {
@@ -165,6 +170,10 @@ export interface AccountStatsResponse {
   account_id?: string;
   email?: string;
   status?: AccountStatus | string;
+  stored_status?: AccountStatus | string;
+  pickable?: boolean;
+  unavailable_reason?: string;
+  cooldown_remaining_ms?: number;
   plan_type?: string;
   disable_reason?: string;
   total_requests?: number;
@@ -181,6 +190,7 @@ export interface AccountStatsResponse {
 }
 
 export interface StatsResponse {
+  server_time?: string;
   summary?: {
     total?: number;
     active?: number;
