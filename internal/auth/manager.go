@@ -1538,6 +1538,11 @@ func (m *Manager) runRefreshStatusPolicy(ctx context.Context, acc *Account, emai
  * noPolicyRemove：未配置该状态码时 true=删号（强制刷新周期），false=禁用凭据（401 恢复路径）
  */
 func (m *Manager) handleRefreshHTTPError(ctx context.Context, acc *Account, email string, err error, noPolicyRemove bool) (recovered bool, outcome QuotaApplyOutcome) {
+	if noPolicyRemove && acc != nil && acc.GetAccessToken() != "" && !acc.IsTokenExpiringSoon() {
+		log.Warnf("账号 [%s] 刷新失败，但当前 access_token 尚未接近过期，保留调度可用；响应摘要: %s", email, refreshErrorExcerpt(err))
+		return false, QuotaApplyNone
+	}
+
 	status, ok := RefreshHTTPStatusFromErr(err)
 	detail := refreshErrorExcerpt(err)
 	if !ok {

@@ -195,7 +195,7 @@ type RetryConfig struct {
 	/* ConcurrentRetry429 显式开启：遇 429 时并发用多个账号同时重试，首个成功响应返回 */
 	ConcurrentRetry429        bool
 	ConcurrentRetry429Timeout time.Duration
-	/* PickIgnoringCooldownFn 忽略冷却状态的选号函数，用于并发重试时取回冷却中的账号 */
+	/* PickIgnoringCooldownFn 保留兼容字段；429 并发重试不再绕过冷却账号 */
 	PickIgnoringCooldownFn func(model string, excluded map[string]bool) (*auth.Account, error)
 }
 
@@ -643,26 +643,6 @@ func (e *Executor) concurrentRetryAfter429(
 		}
 		accounts = append(accounts, acc)
 		exclCopy[acc.FilePath] = true
-	}
-	/* 第二轮：若账号不足，忽略 excluded + 冷却，取回已 429 的账号重试 */
-	if len(accounts) < fanOut && rc.PickIgnoringCooldownFn != nil {
-		exclCooldown := make(map[string]bool, len(accounts))
-		for _, a := range accounts {
-			exclCooldown[a.FilePath] = true
-		}
-		for i := len(accounts); i < fanOut; i++ {
-			acc, err := rc.PickIgnoringCooldownFn(model, exclCooldown)
-			if err != nil || acc == nil {
-				break
-			}
-			if rc.EnsureTokenFreshFn != nil && !rc.EnsureTokenFreshFn(parentCtx, acc) {
-				exclCooldown[acc.FilePath] = true
-				continue
-			}
-			log.Debugf("429 并发重试 取回账号: %s", acc.GetEmail())
-			accounts = append(accounts, acc)
-			exclCooldown[acc.FilePath] = true
-		}
 	}
 	if len(accounts) == 0 {
 		return nil, nil, nil, fmt.Errorf("无可用账号用于并发重试")

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func newPolicyTestManager(t *testing.T) *Manager {
@@ -60,5 +61,25 @@ func TestHandleRefreshHTTPErrorNonHTTPKeepsAccount(t *testing.T) {
 	}
 	if !m.AccountInPool(acc) {
 		t.Fatalf("account should remain in pool")
+	}
+}
+
+func TestBackgroundRefreshFailureDoesNotCooldownFreshToken(t *testing.T) {
+	m := newPolicyTestManager(t)
+	acc := addPolicyTestAccount(m, "fresh-refresh@example.com")
+	acc.Token.AccessToken = "access-token"
+	acc.Token.Expire = time.Now().Add(time.Hour).Format(time.RFC3339)
+	acc.SyncAccessExpireFromToken()
+
+	recovered, out := m.handleRefreshHTTPError(context.Background(), acc, acc.GetEmail(), fmt.Errorf("dial timeout"), true)
+	if recovered {
+		t.Fatalf("unexpected recovered=true")
+	}
+	if out != QuotaApplyNone {
+		t.Fatalf("expected no scheduling cooldown for fresh token, got %v", out)
+	}
+	stats := acc.GetStats()
+	if stats.Status != "active" || !stats.Pickable {
+		t.Fatalf("expected fresh-token account to remain pickable, status=%s pickable=%v", stats.Status, stats.Pickable)
 	}
 }
