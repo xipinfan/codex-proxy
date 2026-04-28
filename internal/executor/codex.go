@@ -183,7 +183,7 @@ type RetryConfig struct {
 	/* On401Fn 返回 true 则同号立即重发上游；false 则换号。对话场景多为 false + 异步刷新失效号 */
 	On401Fn              func(acc *auth.Account) bool
 	On429RecoveryFn      func(ctx context.Context, acc *auth.Account)
-	OnAfterUpstreamErrFn func(acc *auth.Account, model string, statusCode int, errBody []byte)
+	OnAfterUpstreamErrFn func(acc *auth.Account, model string, statusCode int, errBody []byte) bool
 	/* QuotaCheckFn 选号后预检：返回 false 时本 attempt 内重选（不消耗上游 trySend），直至通过或选号失败 */
 	QuotaCheckFn  func(ctx context.Context, acc *auth.Account) bool
 	MaxRetry      int
@@ -414,10 +414,14 @@ func (e *Executor) sendWithRetry(ctx context.Context, rc RetryConfig, model stri
 			errBody, _ := io.ReadAll(io.LimitReader(httpResp.Body, 1<<20))
 			_ = httpResp.Body.Close()
 
-			handleAccountError(account, httpResp.StatusCode, errBody)
-
+			handledByHook := false
 			if rc.OnAfterUpstreamErrFn != nil {
-				rc.OnAfterUpstreamErrFn(account, model, httpResp.StatusCode, errBody)
+				handledByHook = rc.OnAfterUpstreamErrFn(account, model, httpResp.StatusCode, errBody)
+			}
+			if handledByHook {
+				account.RecordFailure()
+			} else {
+				handleAccountError(account, httpResp.StatusCode, errBody)
 			}
 
 			if httpResp.StatusCode == 429 && rc.On429RecoveryFn != nil {

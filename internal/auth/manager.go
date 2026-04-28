@@ -1225,20 +1225,21 @@ func (m *Manager) InvalidateSelectorCache() {
 	}
 }
 
-func (m *Manager) RecordModelFailureIfAccessError(acc *Account, model string, statusCode int, errBody []byte) {
+func (m *Manager) RecordModelFailureIfAccessError(acc *Account, model string, statusCode int, errBody []byte) bool {
 	if acc == nil || (statusCode != 400 && statusCode != 403) {
-		return
+		return false
 	}
 	msg := strings.ToLower(string(errBody))
 	if !looksLikeModelAccessError(msg) {
-		return
+		return false
 	}
 	if acc.RecordModelAccessFailure(model, time.Now()) {
 		log.Warnf("账号 [%s] 模型 [%s] 连续权限错误，已屏蔽 7 天", acc.GetEmail(), model)
 		m.InvalidateSelectorCache()
-		return
+		return true
 	}
 	log.Debugf("账号 [%s] 模型 [%s] 记录一次权限错误", acc.GetEmail(), model)
+	return true
 }
 
 func looksLikeModelAccessError(msg string) bool {
