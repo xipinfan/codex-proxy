@@ -324,6 +324,10 @@ var modelList = []modelListEntry{
 	{base: "gpt-5.5", suffixes: []string{"none", "minimal", "low", "medium", "high", "xhigh"}},
 }
 
+var imageModelList = []string{
+	"gpt-image-2",
+}
+
 func expandModelSubvariantIDs(id string, enableFast bool, enable1M bool, enableImage bool) []string {
 	out := []string{id}
 	if enable1M {
@@ -357,6 +361,9 @@ func (h *ProxyHandler) handleModels(ctx *fasthttp.RequestCtx) {
 				models = append(models, map[string]interface{}{"id": mid, "object": "model", "owned_by": "openai"})
 			}
 		}
+	}
+	for _, id := range imageModelList {
+		models = append(models, map[string]interface{}{"id": id, "object": "model", "owned_by": "openai"})
 	}
 
 	writeJSON(ctx, fasthttp.StatusOK, map[string]interface{}{
