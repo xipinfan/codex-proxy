@@ -179,6 +179,12 @@ func (h *ProxyHandler) RegisterRoutes(r *fasthttprouter.Router) {
 	}
 	r.POST("/v1/responses/compact", apiResponsesCompact)
 
+	apiImageGenerations := h.handleImageGenerations
+	if len(h.apiKeys) > 0 {
+		apiImageGenerations = h.authMiddleware(h.handleImageGenerations)
+	}
+	r.POST("/v1/images/generations", apiImageGenerations)
+
 	apiMessages := h.handleMessages
 	if len(h.apiKeys) > 0 {
 		apiMessages = h.authMiddleware(h.handleMessages)
