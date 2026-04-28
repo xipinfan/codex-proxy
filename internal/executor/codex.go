@@ -198,6 +198,8 @@ type RetryConfig struct {
 	ConcurrentRetry429Timeout time.Duration
 	/* PickIgnoringCooldownFn 保留兼容字段；429 并发重试不再绕过冷却账号 */
 	PickIgnoringCooldownFn func(model string, excluded map[string]bool) (*auth.Account, error)
+	/* SkipModelAccessClearOnHTTP2xx 用于需要解析 2xx 响应体后才判断成功的路径（如图片 SSE） */
+	SkipModelAccessClearOnHTTP2xx bool
 }
 
 /**
@@ -406,7 +408,9 @@ func (e *Executor) sendWithRetry(ctx context.Context, rc RetryConfig, model stri
 			}
 
 			if httpResp.StatusCode >= 200 && httpResp.StatusCode < 300 {
-				account.ClearModelAccessFailure(model)
+				if !rc.SkipModelAccessClearOnHTTP2xx {
+					account.ClearModelAccessFailure(model)
+				}
 				log.Debugf("send stage model=%s account=%s attempt=%d/%d pick=%v build=%v upstream_wait=%v total=%v status=%d", model, account.GetEmail(), attemptOneBased, maxLabel, pickDur, buildDur, doDur, time.Since(startAttempt), httpResp.StatusCode)
 				log.Debugf("send attempt success status=%d account=%s elapsed=%v", httpResp.StatusCode, account.GetEmail(), time.Since(startAttempt).Round(time.Millisecond))
 				return httpResp, nil
@@ -990,14 +994,15 @@ func (e *Executor) ExecuteResponsesNonStream(ctx context.Context, rc RetryConfig
 	return nil, fmt.Errorf("读取响应失败")
 }
 
-func (e *Executor) ExecuteImageGeneration(ctx context.Context, rc RetryConfig, requestBody []byte, model string) ([]byte, error) {
+func (e *Executor) ExecuteImageGeneration(ctx context.Context, rc RetryConfig, requestBody []byte, model string) ([]byte, *auth.Account, error) {
 	apiURL := e.baseURL + "/responses"
+	rc.SkipModelAccessClearOnHTTP2xx = true
 	resp, account, _, err := e.sendWithRetry(ctx, rc, model, apiURL, requestBody, true)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if resp == nil || resp.Body == nil {
-		return nil, ErrEmptyResponse
+		return nil, account, ErrEmptyResponse
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxImageGenerationSSEBytes+1))
@@ -1005,12 +1010,12 @@ func (e *Executor) ExecuteImageGeneration(ctx context.Context, rc RetryConfig, r
 		if account != nil {
 			account.RecordFailure()
 		}
-		return nil, wrapReadErr(err)
+		return nil, account, wrapReadErr(err)
 	}
 	if len(body) > maxImageGenerationSSEBytes {
-		return nil, fmt.Errorf("codex image generation response exceeded size limit")
+		return nil, account, fmt.Errorf("codex image generation response exceeded size limit")
 	}
-	return body, nil
+	return body, account, nil
 }
 
 func (e *Executor) OpenResponsesStream(ctx context.Context, rc RetryConfig, requestBody []byte, model string) (*RawResponse, *auth.Account, int, string, time.Duration, time.Duration, error) {

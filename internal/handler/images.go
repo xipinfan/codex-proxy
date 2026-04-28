@@ -2,9 +2,11 @@ package handler
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"time"
 
+	"codex-proxy/internal/auth"
 	"codex-proxy/internal/translator"
 
 	"github.com/tidwall/gjson"
@@ -65,15 +67,20 @@ func (h *ProxyHandler) handleImageGenerations(ctx *fasthttp.RequestCtx) {
 			sendError(ctx, fasthttp.StatusBadRequest, err.Error(), "invalid_request_error")
 			return
 		}
-		raw, err := h.executor.ExecuteImageGeneration(context.Background(), rc, codexBody, model)
+		raw, account, err := h.executor.ExecuteImageGeneration(context.Background(), rc, codexBody, model)
 		if err != nil {
 			handleExecutorError(ctx, err)
 			return
 		}
 		parsed, err := translator.ParseCodexImageGenerationSSE(raw)
 		if err != nil {
+			h.recordImageModelFailureFromSSEError(account, model, err)
 			sendError(ctx, fasthttp.StatusBadGateway, err.Error(), "bad_gateway")
 			return
+		}
+		if account != nil {
+			account.ClearModelAccessFailure(model)
+			account.RecordSuccess()
 		}
 		images = append(images, parsed.Images...)
 		if len(images) >= count {
@@ -91,4 +98,17 @@ func (h *ProxyHandler) handleImageGenerations(ctx *fasthttp.RequestCtx) {
 	ctx.Response.Header.Set("Content-Type", "application/json")
 	ctx.SetStatusCode(fasthttp.StatusOK)
 	ctx.SetBody(resp)
+}
+
+func (h *ProxyHandler) recordImageModelFailureFromSSEError(account *auth.Account, model string, err error) {
+	if h == nil || h.manager == nil || account == nil || err == nil {
+		return
+	}
+	body, marshalErr := json.Marshal(map[string]any{
+		"error": map[string]any{"message": err.Error()},
+	})
+	if marshalErr != nil {
+		body = []byte(err.Error())
+	}
+	h.manager.RecordModelFailureIfAccessError(account, model, fasthttp.StatusForbidden, body)
 }

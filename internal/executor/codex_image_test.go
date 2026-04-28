@@ -47,12 +47,15 @@ func TestExecuteImageGenerationUsesImageModelForPickingAndCodexResponses(t *test
 	}
 
 	body := []byte(`{"model":"gpt-5.5","stream":true,"store":false}`)
-	got, err := exec.ExecuteImageGeneration(context.Background(), rc, body, "gpt-image-2")
+	got, usedAccount, err := exec.ExecuteImageGeneration(context.Background(), rc, body, "gpt-image-2")
 	if err != nil {
 		t.Fatalf("ExecuteImageGeneration() error = %v", err)
 	}
 	if string(got) == "" {
 		t.Fatalf("expected SSE body")
+	}
+	if usedAccount != acc {
+		t.Fatalf("used account mismatch")
 	}
 	if pickedModel != "gpt-image-2" {
 		t.Fatalf("picked model = %q, want gpt-image-2", pickedModel)
