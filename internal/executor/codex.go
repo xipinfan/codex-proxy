@@ -51,6 +51,7 @@ const (
 	scannerInitSize             = 4 * 1024
 	scannerMaxSize              = 50 * 1024 * 1024
 	defaultKeepaliveIntervalSec = 60
+	maxImageGenerationSSEBytes  = 64 * 1024 * 1024
 )
 
 type HTTPPoolConfig struct {
@@ -987,6 +988,29 @@ func (e *Executor) ExecuteResponsesNonStream(ctx context.Context, rc RetryConfig
 		return nil, fmt.Errorf("未收到 response.completed 事件")
 	}
 	return nil, fmt.Errorf("读取响应失败")
+}
+
+func (e *Executor) ExecuteImageGeneration(ctx context.Context, rc RetryConfig, requestBody []byte, model string) ([]byte, error) {
+	apiURL := e.baseURL + "/responses"
+	resp, account, _, err := e.sendWithRetry(ctx, rc, model, apiURL, requestBody, true)
+	if err != nil {
+		return nil, err
+	}
+	if resp == nil || resp.Body == nil {
+		return nil, ErrEmptyResponse
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxImageGenerationSSEBytes+1))
+	if err != nil {
+		if account != nil {
+			account.RecordFailure()
+		}
+		return nil, wrapReadErr(err)
+	}
+	if len(body) > maxImageGenerationSSEBytes {
+		return nil, fmt.Errorf("codex image generation response exceeded size limit")
+	}
+	return body, nil
 }
 
 func (e *Executor) OpenResponsesStream(ctx context.Context, rc RetryConfig, requestBody []byte, model string) (*RawResponse, *auth.Account, int, string, time.Duration, time.Duration, error) {
