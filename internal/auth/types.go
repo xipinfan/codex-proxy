@@ -117,6 +117,8 @@ type Account struct {
 	usageKey string
 	/* usageRecorder 用于将 usage 事件持久化到日聚合（由 Manager 注入） */
 	usageRecorder func(inputTokens, outputTokens, totalTokens int64, recordedAt time.Time)
+	/* modelBlocks 仅运行时保存账号-模型维度的短期屏蔽状态，不持久化 */
+	modelBlocks map[string]modelBlockState
 }
 
 /**
@@ -139,6 +141,16 @@ const (
 	UnavailableReasonCooldown      = "cooldown"
 	UnavailableReasonTokenExpiring = "token_expiring"
 )
+
+const (
+	modelAccessFailureThreshold = 3
+	modelAccessBlockDuration    = 7 * 24 * time.Hour
+)
+
+type modelBlockState struct {
+	failures     int
+	blockedUntil time.Time
+}
 
 type AccountAvailability struct {
 	Status              string
@@ -335,6 +347,76 @@ func (a *Account) AvailabilityAt(now time.Time) AccountAvailability {
 		a.atomicCooldownMs.Load(),
 		a.accessExpireUnixMs.Load(),
 	)
+}
+
+func normalizeModelBlockKey(model string) string {
+	return strings.ToLower(strings.TrimSpace(model))
+}
+
+func (a *Account) RecordModelAccessFailure(model string, now time.Time) bool {
+	key := normalizeModelBlockKey(model)
+	if key == "" {
+		return false
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if a.modelBlocks == nil {
+		a.modelBlocks = make(map[string]modelBlockState)
+	}
+	state := a.modelBlocks[key]
+	if !state.blockedUntil.IsZero() && now.Before(state.blockedUntil) {
+		return false
+	}
+	state.failures++
+	if state.failures >= modelAccessFailureThreshold {
+		state.failures = modelAccessFailureThreshold
+		state.blockedUntil = now.Add(modelAccessBlockDuration)
+		a.modelBlocks[key] = state
+		return true
+	}
+	a.modelBlocks[key] = state
+	return false
+}
+
+func (a *Account) ClearModelAccessFailure(model string) {
+	key := normalizeModelBlockKey(model)
+	if key == "" {
+		return
+	}
+	a.mu.Lock()
+	if a.modelBlocks != nil {
+		delete(a.modelBlocks, key)
+	}
+	a.mu.Unlock()
+}
+
+func (a *Account) IsModelBlocked(model string, now time.Time) bool {
+	key := normalizeModelBlockKey(model)
+	if key == "" {
+		return false
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if a.modelBlocks == nil {
+		return false
+	}
+	state, ok := a.modelBlocks[key]
+	if !ok || state.blockedUntil.IsZero() {
+		return false
+	}
+	if now.Before(state.blockedUntil) {
+		return true
+	}
+	delete(a.modelBlocks, key)
+	return false
 }
 
 /**

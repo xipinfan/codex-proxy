@@ -183,7 +183,7 @@ type RetryConfig struct {
 	/* On401Fn 返回 true 则同号立即重发上游；false 则换号。对话场景多为 false + 异步刷新失效号 */
 	On401Fn              func(acc *auth.Account) bool
 	On429RecoveryFn      func(ctx context.Context, acc *auth.Account)
-	OnAfterUpstreamErrFn func(acc *auth.Account, statusCode int)
+	OnAfterUpstreamErrFn func(acc *auth.Account, model string, statusCode int, errBody []byte)
 	/* QuotaCheckFn 选号后预检：返回 false 时本 attempt 内重选（不消耗上游 trySend），直至通过或选号失败 */
 	QuotaCheckFn  func(ctx context.Context, acc *auth.Account) bool
 	MaxRetry      int
@@ -405,6 +405,7 @@ func (e *Executor) sendWithRetry(ctx context.Context, rc RetryConfig, model stri
 			}
 
 			if httpResp.StatusCode >= 200 && httpResp.StatusCode < 300 {
+				account.ClearModelAccessFailure(model)
 				log.Debugf("send stage model=%s account=%s attempt=%d/%d pick=%v build=%v upstream_wait=%v total=%v status=%d", model, account.GetEmail(), attemptOneBased, maxLabel, pickDur, buildDur, doDur, time.Since(startAttempt), httpResp.StatusCode)
 				log.Debugf("send attempt success status=%d account=%s elapsed=%v", httpResp.StatusCode, account.GetEmail(), time.Since(startAttempt).Round(time.Millisecond))
 				return httpResp, nil
@@ -416,7 +417,7 @@ func (e *Executor) sendWithRetry(ctx context.Context, rc RetryConfig, model stri
 			handleAccountError(account, httpResp.StatusCode, errBody)
 
 			if rc.OnAfterUpstreamErrFn != nil {
-				rc.OnAfterUpstreamErrFn(account, httpResp.StatusCode)
+				rc.OnAfterUpstreamErrFn(account, model, httpResp.StatusCode, errBody)
 			}
 
 			if httpResp.StatusCode == 429 && rc.On429RecoveryFn != nil {
@@ -681,6 +682,7 @@ func (e *Executor) concurrentRetryAfter429(
 				return
 			}
 			if httpResp.StatusCode >= 200 && httpResp.StatusCode < 300 {
+				account.ClearModelAccessFailure(model)
 				log.Infof("429 并发重试 成功: account=%s status=%d", account.GetEmail(), httpResp.StatusCode)
 				winCh <- result{httpResp, account, nil}
 				return

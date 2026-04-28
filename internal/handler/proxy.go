@@ -408,10 +408,11 @@ func (h *ProxyHandler) buildRetryConfigOnce() executor.RetryConfig {
 		On429RecoveryFn: func(ctx context.Context, acc *auth.Account) {
 			h.manager.ScheduleUpstream429Recovery(ctx, acc, h.quotaChecker)
 		},
-		OnAfterUpstreamErrFn: func(_ *auth.Account, statusCode int) {
+		OnAfterUpstreamErrFn: func(acc *auth.Account, model string, statusCode int, errBody []byte) {
 			if statusCode >= 200 && statusCode < 300 {
 				return
 			}
+			h.manager.RecordModelFailureIfAccessError(acc, model, statusCode, errBody)
 			/* 冷却或限频后失效选号缓存；502/503/504 同步失效，避免大量请求继续撞同一批刚失败的号 */
 			if statusCode == 429 || statusCode == 403 || statusCode == 502 || statusCode == 503 || statusCode == 504 {
 				h.manager.InvalidateSelectorCache()

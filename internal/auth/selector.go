@@ -81,7 +81,6 @@ func (s *RoundRobinSelector) InvalidateAvailableCache() {
  * @returns error - 没有可用账号时返回错误
  */
 func (s *RoundRobinSelector) Pick(model string, accounts []*Account) (*Account, error) {
-	_ = model
 	nowMs := time.Now().UnixMilli()
 	const maxRebuildPasses = 2
 	for pass := 0; pass < maxRebuildPasses; pass++ {
@@ -100,7 +99,7 @@ func (s *RoundRobinSelector) Pick(model string, accounts []*Account) (*Account, 
 			for probe := 0; probe < maxProbe; probe++ {
 				idx := int((start + 1 + uint64(probe)) % uint64(n))
 				acc := available[idx]
-				if accountPickableAt(nowMs, acc) {
+				if accountPickableAt(nowMs, model, acc) {
 					picked = probe
 					break
 				}
@@ -118,7 +117,7 @@ func (s *RoundRobinSelector) Pick(model string, accounts []*Account) (*Account, 
 		nowMs = time.Now().UnixMilli()
 	}
 	/* 缓存与 CAS 争用下仍无满意结果：全量过滤后线性找第一个可选号 */
-	available := filterAvailable(accounts)
+	available := filterAvailable(model, accounts)
 	if len(available) == 0 {
 		return nil, fmt.Errorf("没有可用的 Codex 账号")
 	}
@@ -127,7 +126,7 @@ func (s *RoundRobinSelector) Pick(model string, accounts []*Account) (*Account, 
 	for probe := 0; probe < n; probe++ {
 		idx := int((start + uint64(probe)) % uint64(n))
 		acc := available[idx]
-		if accountPickableAt(nowMs, acc) {
+		if accountPickableAt(nowMs, model, acc) {
 			return acc, nil
 		}
 	}
@@ -167,12 +166,12 @@ func (s *RoundRobinSelector) getOrRefreshCache(accounts []*Account) []*Account {
 		if c2 := s.cachePtr.Load(); c2 != nil {
 			return c2.accounts
 		}
-		return filterAvailable(accounts)
+		return filterAvailable("", accounts)
 	}
 	defer s.refreshing.Store(0)
 
 	/* 重新构建缓存 */
-	available := filterAvailable(accounts)
+	available := filterAvailable("", accounts)
 	if len(available) > 1 {
 		sortByUsedPercent(available)
 	}
@@ -204,7 +203,7 @@ func NewQuotaFirstSelector() *QuotaFirstSelector {
  * Pick 选择剩余额度最高的可用账号
  */
 func (s *QuotaFirstSelector) Pick(model string, accounts []*Account) (*Account, error) {
-	available := filterAvailable(accounts)
+	available := filterAvailable(model, accounts)
 	if len(available) == 0 {
 		return nil, fmt.Errorf("没有可用的 Codex 账号")
 	}
@@ -237,7 +236,7 @@ func NewFillFirstSelector() *FillFirstSelector {
  * @returns error - 没有可用账号时返回错误
  */
 func (s *FillFirstSelector) Pick(model string, accounts []*Account) (*Account, error) {
-	available := filterAvailable(accounts)
+	available := filterAvailable(model, accounts)
 	if len(available) == 0 {
 		return nil, fmt.Errorf("没有可用的 Codex 账号")
 	}
@@ -276,13 +275,19 @@ func sortByUsedPercent(accounts []*Account) {
 /**
  * accountPickableAt 与 filterAvailable 单账号语义一致，供 RR 缓存出号前二次校验
  */
-func accountPickableAt(nowMs int64, acc *Account) bool {
-	return availabilityFromState(
+func accountPickableAt(nowMs int64, model string, acc *Account) bool {
+	if !availabilityFromState(
 		nowMs,
 		AccountStatus(acc.atomicStatus.Load()),
 		acc.atomicCooldownMs.Load(),
 		acc.accessExpireUnixMs.Load(),
-	).Pickable
+	).Pickable {
+		return false
+	}
+	if model != "" && acc.IsModelBlocked(model, time.UnixMilli(nowMs)) {
+		return false
+	}
+	return true
 }
 
 /**
@@ -291,12 +296,12 @@ func accountPickableAt(nowMs int64, acc *Account) bool {
  * @param accounts - 全部账号列表
  * @returns []*Account - 可用的账号列表
  */
-func filterAvailable(accounts []*Account) []*Account {
+func filterAvailable(model string, accounts []*Account) []*Account {
 	nowMs := time.Now().UnixMilli()
 	available := make([]*Account, 0, len(accounts))
 
 	for _, acc := range accounts {
-		if accountPickableAt(nowMs, acc) {
+		if accountPickableAt(nowMs, model, acc) {
 			available = append(available, acc)
 		}
 	}

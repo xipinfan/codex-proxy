@@ -1072,7 +1072,7 @@ func (m *Manager) PickExcluding(model string, excluded map[string]bool) (*Accoun
 			continue
 		}
 		filtered = append(filtered, acc)
-		if accountPickableAt(nowMs, acc) {
+		if accountPickableAt(nowMs, model, acc) {
 			activeOnly = append(activeOnly, acc)
 		}
 	}
@@ -1091,7 +1091,6 @@ func (m *Manager) PickExcluding(model string, excluded map[string]bool) (*Accoun
  * PickRecentlySuccessful 回退选择：优先选最近成功且非排除的账号；所有都排除时清空排除列表重选正常账号
  */
 func (m *Manager) PickRecentlySuccessful(model string, excluded map[string]bool) (*Account, error) {
-	_ = model
 	allAccounts := *m.accountsPtr.Load()
 	/* 按 lastSuccessUnixMs 线性扫描，等价于原 sort 后取最近，避免 O(N log N) */
 	nowMs := time.Now().UnixMilli()
@@ -1100,7 +1099,7 @@ func (m *Manager) PickRecentlySuccessful(model string, excluded map[string]bool)
 	var bestOpen *Account
 	var bestOpenMs int64 = -1
 	for _, acc := range allAccounts {
-		if !accountPickableAt(nowMs, acc) {
+		if !accountPickableAt(nowMs, model, acc) {
 			continue
 		}
 		ms := acc.lastSuccessUnixMs.Load()
@@ -1123,7 +1122,7 @@ func (m *Manager) PickRecentlySuccessful(model string, excluded map[string]bool)
 
 	if bestAll == nil {
 		for _, acc := range allAccounts {
-			if !accountPickableAt(nowMs, acc) {
+			if !accountPickableAt(nowMs, model, acc) {
 				continue
 			}
 			return acc, nil
@@ -1160,6 +1159,9 @@ func (m *Manager) PickIgnoringCooldown(model string, excluded map[string]bool) (
 		}
 		st := AccountStatus(acc.atomicStatus.Load())
 		if st == StatusDisabled {
+			continue
+		}
+		if acc.IsModelBlocked(model, time.Now()) {
 			continue
 		}
 		candidates = append(candidates, acc)
@@ -1221,6 +1223,34 @@ func (m *Manager) InvalidateSelectorCache() {
 	if inv, ok := m.selector.(selectorCacheInvalidator); ok {
 		inv.InvalidateAvailableCache()
 	}
+}
+
+func (m *Manager) RecordModelFailureIfAccessError(acc *Account, model string, statusCode int, errBody []byte) {
+	if acc == nil || (statusCode != 400 && statusCode != 403) {
+		return
+	}
+	msg := strings.ToLower(string(errBody))
+	if !looksLikeModelAccessError(msg) {
+		return
+	}
+	if acc.RecordModelAccessFailure(model, time.Now()) {
+		log.Warnf("账号 [%s] 模型 [%s] 连续权限错误，已屏蔽 7 天", acc.GetEmail(), model)
+		m.InvalidateSelectorCache()
+		return
+	}
+	log.Debugf("账号 [%s] 模型 [%s] 记录一次权限错误", acc.GetEmail(), model)
+}
+
+func looksLikeModelAccessError(msg string) bool {
+	if !strings.Contains(msg, "model") {
+		return false
+	}
+	for _, clue := range []string{"permission", "access", "entitled", "available", "not found", "unsupported"} {
+		if strings.Contains(msg, clue) {
+			return true
+		}
+	}
+	return false
 }
 
 /**

@@ -20,7 +20,7 @@ func BenchmarkFilterAvailable10k(b *testing.B) {
 	accs := benchAccountSlice(10000)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		filterAvailable(accs)
+		filterAvailable("gpt-5", accs)
 	}
 }
 
