@@ -6,7 +6,6 @@
 package executor
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"errors"
@@ -32,7 +31,7 @@ import (
 
 /* Codex 客户端版本常量，用于请求头 */
 const (
-	codexClientVersion = "0.118.0"
+	codexClientVersion = "0.125.0"
 	codexUserAgent     = "codex-tui/0.118.0 (Mac OS 26.3.1; arm64) iTerm.app/3.6.9 (codex-tui; 0.118.0)"
 	codexOriginator    = "codex-tui"
 )
@@ -808,58 +807,44 @@ func (e *Executor) ExecuteNonStream(ctx context.Context, rc RetryConfig, request
 	for emptyAttempt := 0; emptyAttempt <= emptyRetryMax; emptyAttempt++ {
 		rcExcl := MergeRetryConfigExcluded(rc, excludedForEmpty)
 		sendStart := time.Now()
-		httpResp, account, attempts, err := e.sendWithRetry(ctx, rcExcl, model, apiURL, codexBody, true)
+		httpResp, account, attempts, err := e.sendWithRetry(ctx, rcExcl, model, apiURL, codexBody, false)
 		sendDur := time.Since(sendStart)
 		if err != nil {
 			return nil, err
 		}
 
-		scanner := bufio.NewScanner(httpResp.Body)
-		scanner.Buffer(make([]byte, scannerInitSize), scannerMaxSize)
+		data, readErr := io.ReadAll(httpResp.Body)
+		_ = httpResp.Body.Close()
+
 		var result []byte
 		gotValid := false
-		for scanner.Scan() {
-			line := scanner.Bytes()
-			if !bytes.HasPrefix(line, []byte("data:")) {
-				continue
-			}
-			jsonData := bytes.TrimSpace(line[5:])
-			if gjson.GetBytes(jsonData, "type").String() != "response.completed" {
-				continue
-			}
-			resStr, hasOutput := translator.ConvertNonStreamResponse(jsonData, reverseToolMap)
-			if !hasOutput {
-				break
-			}
-			/* 仅在有有效输出时才记录 usage */
-			usage := gjson.GetBytes(jsonData, "response.usage")
-			var inputTokens, outputTokens, totalTokens int64
-			if usage.Exists() {
-				inputTokens = usage.Get("input_tokens").Int()
-				outputTokens = usage.Get("output_tokens").Int()
-				totalTokens = usage.Get("total_tokens").Int()
-			}
-			if inputTokens == 0 && outputTokens == 0 {
-				log.Warnf("nonstream usage is 0 or not found, model=%s account=%s response=%s, will estimate from output",
-					baseModel, account.GetEmail(), gjson.GetBytes(jsonData, "response.id").String())
-				outputTokens = estimateTokensFromOutput(baseModel)
-				totalTokens = outputTokens
-				log.Warnf("nonstream usage estimated output_tokens=%d total=%d model=%s account=%s",
-					outputTokens, totalTokens, baseModel, account.GetEmail())
-			}
-			if inputTokens > 0 || outputTokens > 0 {
-				account.RecordUsage(inputTokens, outputTokens, totalTokens)
-			} else {
-				log.Warnf("nonstream all usage zero, skipping RecordUsage model=%s account=%s", baseModel, account.GetEmail())
-			}
-			if resStr != "" {
+		if completedEvent, ok := extractCompletedResponseEvent(data); ok {
+			resStr, hasOutput := translator.ConvertNonStreamResponse(completedEvent, reverseToolMap)
+			if hasOutput && resStr != "" {
+				usage := gjson.GetBytes(completedEvent, "response.usage")
+				var inputTokens, outputTokens, totalTokens int64
+				if usage.Exists() {
+					inputTokens = usage.Get("input_tokens").Int()
+					outputTokens = usage.Get("output_tokens").Int()
+					totalTokens = usage.Get("total_tokens").Int()
+				}
+				if inputTokens == 0 && outputTokens == 0 {
+					log.Warnf("nonstream usage is 0 or not found, model=%s account=%s response=%s, will estimate from output",
+						baseModel, account.GetEmail(), gjson.GetBytes(completedEvent, "response.id").String())
+					outputTokens = estimateTokensFromOutput(baseModel)
+					totalTokens = outputTokens
+					log.Warnf("nonstream usage estimated output_tokens=%d total=%d model=%s account=%s",
+						outputTokens, totalTokens, baseModel, account.GetEmail())
+				}
+				if inputTokens > 0 || outputTokens > 0 {
+					account.RecordUsage(inputTokens, outputTokens, totalTokens)
+				} else {
+					log.Warnf("nonstream all usage zero, skipping RecordUsage model=%s account=%s", baseModel, account.GetEmail())
+				}
 				result = []byte(resStr)
 				gotValid = true
-				break
 			}
 		}
-		scanErr := scanner.Err()
-		_ = httpResp.Body.Close()
 
 		if gotValid && len(result) > 0 {
 			account.RecordSuccess()
@@ -869,13 +854,13 @@ func (e *Executor) ExecuteNonStream(ctx context.Context, rc RetryConfig, request
 		/* 空回答或读错误时标记账号失败，防止下一个请求继续选择该账号 */
 		account.RecordFailure()
 		excludedForEmpty[account.FilePath] = true
-		if scanErr != nil {
-			if isRetryableUpstreamReadErr(scanErr) && emptyAttempt < emptyRetryMax {
-				log.Warnf("nonstream 读 SSE 失败，换号重试 (%d/%d) account=%s: %v", emptyAttempt+1, emptyRetryMax+1, account.GetEmail(), wrapReadErr(scanErr))
+		if readErr != nil {
+			if isRetryableUpstreamReadErr(readErr) && emptyAttempt < emptyRetryMax {
+				log.Warnf("nonstream 读取上游失败，换号重试 (%d/%d) account=%s: %v", emptyAttempt+1, emptyRetryMax+1, account.GetEmail(), wrapReadErr(readErr))
 				continue
 			}
 			log.Infof("req summary nonstream model=%s account=%s attempts=%d convert=%v upstream=%v total=%v (ERR)", baseModel, account.GetEmail(), attempts, convertDur, sendDur, time.Since(startTotal))
-			return nil, fmt.Errorf("读取响应失败: %w", wrapReadErr(scanErr))
+			return nil, fmt.Errorf("读取响应失败: %w", wrapReadErr(readErr))
 		}
 		if emptyAttempt < emptyRetryMax {
 			log.Warnf("非流式空返回，换号重试 (account=%s attempt=%d/%d)", account.GetEmail(), emptyAttempt+1, emptyRetryMax+1)
@@ -948,53 +933,39 @@ func (e *Executor) ExecuteResponsesNonStream(ctx context.Context, rc RetryConfig
 			return nil, ctx.Err()
 		}
 		rcExcl := MergeRetryConfigExcluded(rc, excluded)
-		httpResp, account, attempts, err := e.sendWithRetry(ctx, rcExcl, model, apiURL, codexBody, true)
+		httpResp, account, attempts, err := e.sendWithRetry(ctx, rcExcl, model, apiURL, codexBody, false)
 		if err != nil {
 			return nil, err
 		}
 		sendDur := time.Since(sendStart)
 
-		scanner := bufio.NewScanner(httpResp.Body)
-		scanner.Buffer(make([]byte, scannerInitSize), scannerMaxSize)
+		data, readErr := io.ReadAll(httpResp.Body)
+		_ = httpResp.Body.Close()
 
-		for scanner.Scan() {
-			line := scanner.Bytes()
-			if !bytes.HasPrefix(line, []byte("data:")) {
-				continue
+		if resp, ok := extractCompletedResponseObject(data); ok {
+			usage := gjson.GetBytes(resp, "usage")
+			if usage.Exists() {
+				account.RecordUsage(
+					usage.Get("input_tokens").Int(),
+					usage.Get("output_tokens").Int(),
+					usage.Get("total_tokens").Int(),
+				)
 			}
-			jsonData := bytes.TrimSpace(line[5:])
-			if gjson.GetBytes(jsonData, "type").String() != "response.completed" {
-				continue
-			}
-			if resp := gjson.GetBytes(jsonData, "response"); resp.Exists() {
-				_ = httpResp.Body.Close()
-				usage := gjson.GetBytes(jsonData, "response.usage")
-				if usage.Exists() {
-					account.RecordUsage(
-						usage.Get("input_tokens").Int(),
-						usage.Get("output_tokens").Int(),
-						usage.Get("total_tokens").Int(),
-					)
-				}
-				account.RecordSuccess()
-				log.Infof("req summary responses-nonstream model=%s account=%s attempts=%d convert=%v upstream=%v total=%v", baseModel, account.GetEmail(), attempts, convertDur, sendDur, time.Since(startTotal))
-				return []byte(resp.Raw), nil
-			}
+			account.RecordSuccess()
+			log.Infof("req summary responses-nonstream model=%s account=%s attempts=%d convert=%v upstream=%v total=%v", baseModel, account.GetEmail(), attempts, convertDur, sendDur, time.Since(startTotal))
+			return resp, nil
 		}
 
-		if err := scanner.Err(); err != nil {
-			_ = httpResp.Body.Close()
+		if readErr != nil {
 			account.RecordFailure()
-			if isRetryableUpstreamReadErr(err) && round+1 < readRounds {
+			if isRetryableUpstreamReadErr(readErr) && round+1 < readRounds {
 				excluded[account.FilePath] = true
-				log.Warnf("responses-nonstream 读 SSE 失败，换号重试 (%d/%d): %v", round+1, readRounds, wrapReadErr(err))
+				log.Warnf("responses-nonstream 读取上游失败，换号重试 (%d/%d): %v", round+1, readRounds, wrapReadErr(readErr))
 				continue
 			}
 			log.Infof("req summary responses-nonstream model=%s account=%s attempts=%d convert=%v upstream=%v total=%v (ERR)", baseModel, account.GetEmail(), attempts, convertDur, sendDur, time.Since(startTotal))
-			return nil, fmt.Errorf("读取响应失败: %w", wrapReadErr(err))
+			return nil, fmt.Errorf("读取响应失败: %w", wrapReadErr(readErr))
 		}
-
-		_ = httpResp.Body.Close()
 		account.RecordFailure()
 		if round+1 < readRounds {
 			excluded[account.FilePath] = true
@@ -1005,6 +976,72 @@ func (e *Executor) ExecuteResponsesNonStream(ctx context.Context, rc RetryConfig
 		return nil, fmt.Errorf("未收到 response.completed 事件")
 	}
 	return nil, fmt.Errorf("读取响应失败")
+}
+
+func extractCompletedResponseEvent(body []byte) ([]byte, bool) {
+	body = bytes.TrimSpace(body)
+	if len(body) == 0 {
+		return nil, false
+	}
+	if completed := findCompletedEventInSSE(body); len(completed) > 0 {
+		return completed, true
+	}
+
+	root := gjson.ParseBytes(body)
+	if root.Get("type").String() == "response.completed" {
+		return body, true
+	}
+	if isRawResponseObject(root) {
+		wrapped := `{"type":"response.completed","response":null}`
+		wrapped, _ = sjson.SetRaw(wrapped, "response", string(body))
+		return []byte(wrapped), true
+	}
+	return nil, false
+}
+
+func extractCompletedResponseObject(body []byte) ([]byte, bool) {
+	body = bytes.TrimSpace(body)
+	if len(body) == 0 {
+		return nil, false
+	}
+
+	root := gjson.ParseBytes(body)
+	if isRawResponseObject(root) {
+		return body, true
+	}
+	if completed, ok := extractCompletedResponseEvent(body); ok {
+		if resp := gjson.GetBytes(completed, "response"); resp.Exists() {
+			return []byte(resp.Raw), true
+		}
+	}
+	return nil, false
+}
+
+func findCompletedEventInSSE(body []byte) []byte {
+	for _, line := range bytes.Split(body, []byte("\n")) {
+		line = bytes.TrimSpace(line)
+		if !bytes.HasPrefix(line, []byte("data:")) {
+			continue
+		}
+		jsonData := bytes.TrimSpace(line[5:])
+		if len(jsonData) == 0 || bytes.Equal(jsonData, []byte("[DONE]")) {
+			continue
+		}
+		if gjson.GetBytes(jsonData, "type").String() == "response.completed" {
+			return jsonData
+		}
+	}
+	return nil
+}
+
+func isRawResponseObject(root gjson.Result) bool {
+	if !root.Exists() || !root.IsObject() {
+		return false
+	}
+	if root.Get("object").String() == "response" {
+		return true
+	}
+	return root.Get("id").Exists() && root.Get("output").Exists()
 }
 
 func (e *Executor) OpenResponsesStream(ctx context.Context, rc RetryConfig, requestBody []byte, model string) (*RawResponse, *auth.Account, int, string, time.Duration, time.Duration, error) {
