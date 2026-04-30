@@ -426,8 +426,21 @@ func (s *CodexResponsesStream) PumpChatCompletion(w io.Writer, flush func()) err
 	}
 	doneWriteDur := time.Since(doneWriteStart)
 
-	if state.UsageInput > 0 || state.UsageOutput > 0 {
-		s.account.RecordUsage(state.UsageInput, state.UsageOutput, state.UsageTotal)
+	inputTokens := state.UsageInput
+	outputTokens := state.UsageOutput
+	totalTokens := state.UsageTotal
+	if inputTokens == 0 && outputTokens == 0 {
+		log.Warnf("req summary stream usage is 0, model=%s account=%s response_id=%s completed=%v has_text=%v has_tool=%v has_reasoning=%v, will estimate from output",
+			s.BaseModel, s.account.GetEmail(), state.ResponseID, state.Completed, state.HasText, state.HasToolCall, state.HasReasoning)
+		outputTokens = estimateTokensFromOutput(s.BaseModel)
+		totalTokens = outputTokens
+		log.Warnf("req summary stream usage estimated output_tokens=%d total=%d model=%s account=%s",
+			outputTokens, totalTokens, s.BaseModel, s.account.GetEmail())
+	}
+	if inputTokens > 0 || outputTokens > 0 {
+		s.account.RecordUsage(inputTokens, outputTokens, totalTokens)
+	} else {
+		log.Warnf("req summary stream all usage zero, skipping RecordUsage model=%s account=%s", s.BaseModel, s.account.GetEmail())
 	}
 	s.account.RecordSuccess()
 	firstChunkDur := time.Duration(0)
@@ -625,4 +638,8 @@ func (s *CodexCompactStream) PumpBody(w io.Writer, flush func()) error {
 			return wrapReadErr(err)
 		}
 	}
+}
+
+func estimateTokensFromOutput(model string) int64 {
+	return 0
 }

@@ -49,7 +49,7 @@ type ManagerOptions struct {
 	QuotaHTTPStatusActions map[string]string
 	/* RefreshHTTPStatusPolicy 刷新 token 接口按状态码：phase=none|refresh_once|cooldown_then_retry，final=remove|disable|cooldown */
 	RefreshHTTPStatusPolicy map[string]map[string]string
-	/* QuotaHTTPStatusPolicy 额度 wham/usage 同上；未出现在表中的状态码走简单逻辑（一般 4xx 直接 remove） */
+	/* QuotaHTTPStatusPolicy 额度 wham/usage 同上；未出现在表中的状态码默认冷却保留 */
 	QuotaHTTPStatusPolicy map[string]map[string]string
 	/* Auth401SyncRefreshConcurrency 请求路径上「401→同步 OAuth」的全局并发上限；0 表示不限制。
 	   高并发时打满 OAuth 易 429，槽满则直接换号（后台周期刷新仍会修 Token），减少无效刷新与 WARN 刷屏。 */
@@ -95,6 +95,7 @@ type Manager struct {
 	refreshSingleTimeoutSec int
 	refreshBatchSize        int
 	saveQueue               chan *Account /* 异步磁盘写入队列 */
+	usagePersistSem         chan struct{}
 	stopCh                  chan struct{}
 	importMu                sync.Mutex /* 防止并发导入账号文件到数据库 */
 	refreshHTTPPolicy       map[int]httpStatusPolicy
@@ -139,6 +140,7 @@ func NewManager(authDir string, db *sql.DB, proxyURL string, refreshInterval int
 		cooldown429Sec:          defaultCooldown429Sec,
 		refreshSingleTimeoutSec: defaultRefreshSingleTimeoutSec,
 		saveQueue:               make(chan *Account, 4096),
+		usagePersistSem:         make(chan struct{}, 256),
 		stopCh:                  make(chan struct{}),
 	}
 	if opts != nil {
@@ -462,6 +464,7 @@ func (m *Manager) mergeAppendAccounts(newAccs []*Account) (added int) {
 		if acc == nil {
 			continue
 		}
+		m.attachAccountUsageRecorder(acc)
 		if _, exists := m.accountIndex[acc.FilePath]; exists {
 			continue
 		}
@@ -619,6 +622,9 @@ func (m *Manager) LoadAccounts() error {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	for _, acc := range accounts {
+		m.attachAccountUsageRecorder(acc)
+	}
 	m.accounts = accounts
 	m.accountIndex = index
 	m.publishSnapshot()
@@ -812,6 +818,9 @@ func (m *Manager) loadAccountsFromDB() error {
 		return err
 	}
 
+	for _, acc := range accounts {
+		m.attachAccountUsageRecorder(acc)
+	}
 	m.accounts = accounts
 	m.accountIndex = index
 	return nil
@@ -1364,6 +1373,43 @@ func quotaFailureReasonCode(code int) string {
 	return fmt.Sprintf("quota_http_%d", code)
 }
 
+func truncateLogExcerpt(s string, max int) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	if max <= 0 {
+		max = 200
+	}
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "..."
+}
+
+func refreshErrorExcerpt(err error) string {
+	if err == nil {
+		return ""
+	}
+	var re *RefreshError
+	if errors.As(err, &re) {
+		return truncateLogExcerpt(re.Msg, 200)
+	}
+	return truncateLogExcerpt(err.Error(), 200)
+}
+
+func quotaResponseExcerpt(acc *Account) string {
+	if acc == nil {
+		return ""
+	}
+	acc.mu.RLock()
+	defer acc.mu.RUnlock()
+	if acc.QuotaInfo == nil || len(acc.QuotaInfo.RawData) == 0 {
+		return ""
+	}
+	return truncateLogExcerpt(string(acc.QuotaInfo.RawData), 200)
+}
+
 func (m *Manager) trySingleRefreshToken(ctx context.Context, acc *Account) (*TokenData, error) {
 	acc.mu.RLock()
 	rt := acc.Token.RefreshToken
@@ -1374,12 +1420,14 @@ func (m *Manager) trySingleRefreshToken(ctx context.Context, acc *Account) (*Tok
 	return m.refresher.RefreshToken(ctx, rt)
 }
 
-func (m *Manager) applyFinalHTTPRefresh(acc *Account, email, reason string, final HTTPErrorAction, httpStatus int) QuotaApplyOutcome {
+func (m *Manager) applyFinalHTTPRefresh(acc *Account, email, reason string, final HTTPErrorAction, httpStatus int, detail string) QuotaApplyOutcome {
 	switch final {
 	case HTTPErrorActionRemove:
+		log.Warnf("账号 [%s] 刷新 HTTP %d 按策略删除，响应摘要: %s", email, httpStatus, truncateLogExcerpt(detail, 200))
 		m.RemoveAccount(acc, reason)
 		return QuotaApplyRemoved
 	case HTTPErrorActionDisable:
+		log.Warnf("账号 [%s] 刷新 HTTP %d 按策略禁用，响应摘要: %s", email, httpStatus, truncateLogExcerpt(detail, 200))
 		m.DisableAccountByRenamingFile(acc, reason)
 		return QuotaApplyDisabled
 	default:
@@ -1393,17 +1441,23 @@ func (m *Manager) applyFinalHTTPRefresh(acc *Account, email, reason string, fina
 		if m.db != nil {
 			m.enqueueSave(acc)
 		}
-		log.Warnf("账号 [%s] 刷新 HTTP %d 按策略冷却", email, httpStatus)
+		log.Warnf("账号 [%s] 刷新 HTTP %d 按策略冷却，响应摘要: %s", email, httpStatus, truncateLogExcerpt(detail, 200))
 		return QuotaApplyCooldown
 	}
 }
 
-func (m *Manager) applyFinalHTTPQuota(acc *Account, reason string, final HTTPErrorAction, httpStatus int) QuotaApplyOutcome {
+func (m *Manager) applyFinalHTTPQuota(acc *Account, reason string, final HTTPErrorAction, httpStatus int, detail string) QuotaApplyOutcome {
+	email := ""
+	if acc != nil {
+		email = acc.GetEmail()
+	}
 	switch final {
 	case HTTPErrorActionRemove:
+		log.Warnf("账号 [%s] 额度 HTTP %d 按策略删除，响应摘要: %s", email, httpStatus, truncateLogExcerpt(detail, 200))
 		m.RemoveAccount(acc, reason)
 		return QuotaApplyRemoved
 	case HTTPErrorActionDisable:
+		log.Warnf("账号 [%s] 额度 HTTP %d 按策略禁用，响应摘要: %s", email, httpStatus, truncateLogExcerpt(detail, 200))
 		m.DisableAccountByRenamingFile(acc, reason)
 		return QuotaApplyDisabled
 	default:
@@ -1417,14 +1471,15 @@ func (m *Manager) applyFinalHTTPQuota(acc *Account, reason string, final HTTPErr
 		if m.db != nil {
 			m.enqueueSave(acc)
 		}
+		log.Warnf("账号 [%s] 额度 HTTP %d 按策略冷却，响应摘要: %s", email, httpStatus, truncateLogExcerpt(detail, 200))
 		return QuotaApplyCooldown
 	}
 }
 
-func (m *Manager) runRefreshStatusPolicy(ctx context.Context, acc *Account, email string, httpStatus int, pol httpStatusPolicy) (recovered bool, outcome QuotaApplyOutcome) {
+func (m *Manager) runRefreshStatusPolicy(ctx context.Context, acc *Account, email string, httpStatus int, pol httpStatusPolicy, detail string) (recovered bool, outcome QuotaApplyOutcome) {
 	reason := refreshFailureReasonCode(httpStatus)
 	doFinal := func() QuotaApplyOutcome {
-		return m.applyFinalHTTPRefresh(acc, email, reason, pol.final, httpStatus)
+		return m.applyFinalHTTPRefresh(acc, email, reason, pol.final, httpStatus, detail)
 	}
 	switch pol.phase {
 	case policyPhaseNone:
@@ -1445,9 +1500,9 @@ func (m *Manager) runRefreshStatusPolicy(ctx context.Context, acc *Account, emai
 		if ok && st2 == httpStatus {
 			return false, doFinal()
 		}
-		log.Warnf("账号 [%s] 刷新重试后错误变化 (%d): %v", email, httpStatus, err)
-		m.RemoveAccount(acc, ReasonRefreshFailed)
-		return false, QuotaApplyRemoved
+		nextDetail := refreshErrorExcerpt(err)
+		log.Warnf("账号 [%s] 刷新重试后错误变化 (%d)，改为冷却保留；响应摘要: %s", email, httpStatus, nextDetail)
+		return false, m.applyFinalHTTPRefresh(acc, email, ReasonRefreshFailed, HTTPErrorActionCooldown, st2, nextDetail)
 	case policyPhaseCooldownThenRetry:
 		cd := m.cooldownDurationForHTTPStatus(httpStatus)
 		log.Warnf("账号 [%s] 刷新 HTTP %d，等待 %v 后再试一次", email, httpStatus, cd)
@@ -1471,9 +1526,9 @@ func (m *Manager) runRefreshStatusPolicy(ctx context.Context, acc *Account, emai
 		if ok && st2 == httpStatus {
 			return false, doFinal()
 		}
-		log.Warnf("账号 [%s] 冷却后再刷新仍失败: %v", email, err)
-		m.RemoveAccount(acc, ReasonRefreshFailed)
-		return false, QuotaApplyRemoved
+		nextDetail := refreshErrorExcerpt(err)
+		log.Warnf("账号 [%s] 冷却后再刷新仍失败，改为冷却保留；响应摘要: %s", email, nextDetail)
+		return false, m.applyFinalHTTPRefresh(acc, email, ReasonRefreshFailed, HTTPErrorActionCooldown, st2, nextDetail)
 	default:
 		return false, doFinal()
 	}
@@ -1485,35 +1540,18 @@ func (m *Manager) runRefreshStatusPolicy(ctx context.Context, acc *Account, emai
  */
 func (m *Manager) handleRefreshHTTPError(ctx context.Context, acc *Account, email string, err error, noPolicyRemove bool) (recovered bool, outcome QuotaApplyOutcome) {
 	status, ok := RefreshHTTPStatusFromErr(err)
+	detail := refreshErrorExcerpt(err)
 	if !ok {
-		log.Warnf("账号 [%s] 刷新失败: %v", email, err)
-		if m.disableAuth401Remove {
-			log.Warnf("账号 [%s] 已配置不删号/不冷却，保留原状态", email)
-			return false, QuotaApplyCooldown
-		}
-		if noPolicyRemove {
-			m.RemoveAccount(acc, ReasonRefreshFailed)
-			return false, QuotaApplyRemoved
-		}
-		m.DisableAccountByRenamingFile(acc, ReasonAuth401Disabled)
-		return false, QuotaApplyDisabled
+		log.Warnf("账号 [%s] 刷新失败（非 HTTP 错误），改为冷却保留；响应摘要: %s", email, detail)
+		return false, m.applyFinalHTTPRefresh(acc, email, ReasonRefreshFailed, HTTPErrorActionCooldown, 0, detail)
 	}
 	pol, has := m.refreshHTTPPolicy[status]
 	if !has {
-		if m.disableAuth401Remove {
-			log.Warnf("账号 [%s] 刷新 HTTP %d 无策略，已配置不删号/不冷却，保留原状态", email, status)
-			return false, QuotaApplyCooldown
-		}
-		if noPolicyRemove {
-			log.Warnf("账号 [%s] 刷新 HTTP %d 无策略，移除", email, status)
-			m.RemoveAccount(acc, ReasonRefreshFailed)
-			return false, QuotaApplyRemoved
-		}
-		log.Warnf("账号 [%s] 刷新 HTTP %d 无策略，禁用凭据", email, status)
-		m.DisableAccountByRenamingFile(acc, ReasonAuth401Disabled)
-		return false, QuotaApplyDisabled
+		log.Warnf("账号 [%s] 刷新 HTTP %d 无策略，默认冷却保留；响应摘要: %s", email, status, detail)
+		return false, m.applyFinalHTTPRefresh(acc, email, ReasonRefreshFailed, HTTPErrorActionCooldown, status, detail)
 	}
-	return m.runRefreshStatusPolicy(ctx, acc, email, status, pol)
+	_ = noPolicyRemove
+	return m.runRefreshStatusPolicy(ctx, acc, email, status, pol, detail)
 }
 
 func (m *Manager) runQuotaStatusPolicy(ctx context.Context, qc *QuotaChecker, acc *Account, httpStatus int, verdict int, pol httpStatusPolicy) QuotaApplyOutcome {
@@ -1522,7 +1560,7 @@ func (m *Manager) runQuotaStatusPolicy(ctx context.Context, qc *QuotaChecker, ac
 	}
 	reason := quotaFailureReasonCode(httpStatus)
 	doFinal := func() QuotaApplyOutcome {
-		return m.applyFinalHTTPQuota(acc, reason, pol.final, httpStatus)
+		return m.applyFinalHTTPQuota(acc, reason, pol.final, httpStatus, quotaResponseExcerpt(acc))
 	}
 	switch pol.phase {
 	case policyPhaseNone:
@@ -1568,7 +1606,7 @@ func (m *Manager) runQuotaStatusPolicy(ctx context.Context, qc *QuotaChecker, ac
 }
 
 /**
- * applyQuotaUsageHTTPLegacy 未在 quota-http-status-policy 中配置的状态码：429→冷却兜底，其它 4xx→删号
+ * applyQuotaUsageHTTPLegacy 未在 quota-http-status-policy 中配置的状态码：默认冷却保留，等待下次刷新周期再尝试
  */
 func (m *Manager) applyQuotaUsageHTTPLegacy(acc *Account, httpStatus int, verdict int) QuotaApplyOutcome {
 	if acc == nil || verdict == 1 || verdict == 0 {
@@ -1576,10 +1614,9 @@ func (m *Manager) applyQuotaUsageHTTPLegacy(acc *Account, httpStatus int, verdic
 	}
 	reason := quotaFailureReasonCode(httpStatus)
 	if verdict == 2 {
-		return m.applyFinalHTTPQuota(acc, reason, HTTPErrorActionCooldown, httpStatus)
+		return m.applyFinalHTTPQuota(acc, reason, HTTPErrorActionCooldown, httpStatus, quotaResponseExcerpt(acc))
 	}
-	m.RemoveAccount(acc, reason)
-	return QuotaApplyRemoved
+	return m.applyFinalHTTPQuota(acc, reason, HTTPErrorActionCooldown, httpStatus, quotaResponseExcerpt(acc))
 }
 
 /**
@@ -1620,7 +1657,7 @@ func (m *Manager) effectiveQuotaAfterRefresh(qcArg *QuotaChecker) *QuotaChecker 
 }
 
 /**
- * afterRefreshValidateQuota OAuth 刷新成功后同步查额度（401 恢复路径）；4xx 无效（非 429）删号。返回 false 表示已 RemoveAccount。
+ * afterRefreshValidateQuota OAuth 刷新成功后同步查额度（401 恢复路径）；无效响应默认冷却保留。
  */
 func (m *Manager) afterRefreshValidateQuota(ctx context.Context, qc *QuotaChecker, acc *Account) bool {
 	if qc == nil || acc == nil {
@@ -1643,13 +1680,14 @@ func (m *Manager) applyPostRefreshQuotaOutcome(ctx context.Context, qc *QuotaChe
 		_ = m.ApplyQuotaUsageHTTPOutcome(ctx, qc, acc, st, verdict)
 		return true
 	case -1:
+		excerpt := quotaResponseExcerpt(acc)
 		if asyncLog {
-			log.Warnf("账号 [%s] OAuth 刷新成功但异步额度查询无效 (HTTP %d)，视为凭据无效已删除", acc.GetEmail(), st)
+			log.Warnf("账号 [%s] OAuth 刷新成功但异步额度查询无效 (HTTP %d)，改为冷却保留；响应摘要: %s", acc.GetEmail(), st, excerpt)
 		} else {
-			log.Warnf("账号 [%s] OAuth 刷新成功但额度查询无效 (HTTP %d)，视为凭据无效已删除", acc.GetEmail(), st)
+			log.Warnf("账号 [%s] OAuth 刷新成功但额度查询无效 (HTTP %d)，改为冷却保留；响应摘要: %s", acc.GetEmail(), st, excerpt)
 		}
-		m.RemoveAccount(acc, ReasonQuotaInvalidAfterRefresh)
-		return false
+		_ = m.ApplyQuotaUsageHTTPOutcome(ctx, qc, acc, st, verdict)
+		return true
 	default:
 		if asyncLog {
 			log.Debugf("账号 [%s] 刷新后异步额度查询暂态失败 (HTTP %d)，保留账号", acc.GetEmail(), st)
@@ -1842,6 +1880,7 @@ func (m *Manager) scanNewFiles() {
 	newCount := 0
 	for _, entry := range loaded {
 		if _, exists := m.accountIndex[entry.path]; !exists {
+			m.attachAccountUsageRecorder(entry.acc)
 			m.accounts = append(m.accounts, entry.acc)
 			m.accountIndex[entry.path] = entry.acc
 			newCount++
@@ -2139,6 +2178,64 @@ func (m *Manager) forceRefreshAccount(ctx context.Context, acc *Account) bool {
 	return true
 }
 
+/*
+ * ValidateAccountAfterIngest 导入后立即校验账号可用性：用 refresh_token 刷新一次并持久化最新 token。
+ * 不删除账号，仅返回成功/失败与原因，由调用方决定展示或记录。
+ */
+func (m *Manager) ValidateAccountAfterIngest(ctx context.Context, acc *Account) IngestValidation {
+	if acc == nil {
+		return IngestValidation{Success: false, Message: "账号为空"}
+	}
+	if !acc.HasRefreshToken() {
+		return IngestValidation{
+			Email:     acc.GetEmail(),
+			AccountID: acc.GetAccountID(),
+			Success:   false,
+			Message:   "缺少 refresh_token，无法执行刷新校验",
+		}
+	}
+
+	if !acc.refreshing.CompareAndSwap(0, 1) {
+		return IngestValidation{
+			Email:     acc.GetEmail(),
+			AccountID: acc.GetAccountID(),
+			Success:   false,
+			Message:   "账号正在刷新中，跳过本次校验",
+		}
+	}
+	defer acc.refreshing.Store(0)
+
+	acc.mu.RLock()
+	rt := strings.TrimSpace(acc.Token.RefreshToken)
+	acc.mu.RUnlock()
+
+	rctx, cancel := m.refreshRequestContext(ctx)
+	defer cancel()
+
+	td, err := m.refresher.RefreshTokenWithRetry(rctx, rt, 2)
+	if err != nil {
+		return IngestValidation{
+			Email:     acc.GetEmail(),
+			AccountID: acc.GetAccountID(),
+			Success:   false,
+			Message:   truncateLogExcerpt(err.Error(), 200),
+		}
+	}
+
+	acc.UpdateToken(*td)
+	if err := m.saveTokenToFile(acc); err != nil {
+		log.Errorf("账号 [%s] 导入后校验刷新成功但持久化失败: %v", acc.GetEmail(), err)
+	}
+	m.enqueueSave(acc)
+	m.InvalidateSelectorCache()
+	return IngestValidation{
+		Email:     acc.GetEmail(),
+		AccountID: acc.GetAccountID(),
+		Success:   true,
+		Message:   "refresh_token 校验成功",
+	}
+}
+
 func mapRecover401FromRefreshOutcome(q QuotaApplyOutcome, email, fp string, refreshErr error) Auth401RecoverResult {
 	r := Auth401RecoverResult{Email: email, FilePath: fp}
 	switch q {
@@ -2182,6 +2279,23 @@ func (m *Manager) FindAccountByIdentifier(email, filePath string) *Account {
 			}
 		}
 		if email != "" && strings.ToLower(strings.TrimSpace(a.GetEmail())) == wantEmail {
+			return a
+		}
+	}
+	return nil
+}
+
+/*
+ * FindAccountByAccountID 按 account_id 查找账号
+ */
+func (m *Manager) FindAccountByAccountID(accountID string) *Account {
+	accountID = strings.TrimSpace(accountID)
+	if accountID == "" {
+		return nil
+	}
+	accounts := m.GetAccounts()
+	for _, a := range accounts {
+		if strings.TrimSpace(a.GetAccountID()) == accountID {
 			return a
 		}
 	}

@@ -70,6 +70,8 @@ func mergeRefreshHTTPPolicies(opts *ManagerOptions) map[int]httpStatusPolicy {
 		def429 = ParseHTTPErrorAction(opts.RefreshHTTP429Action)
 	}
 	out[429] = httpStatusPolicy{phase: policyPhaseNone, final: def429}
+	/* 默认 401：先重刷一次 token，仍失败则冷却保留账号 */
+	out[401] = httpStatusPolicy{phase: policyPhaseRefreshOnce, final: HTTPErrorActionCooldown}
 	if opts != nil {
 		if t := parseHTTPStatusPolicyTable(opts.RefreshHTTPStatusPolicy); t != nil {
 			for c, p := range t {
@@ -87,6 +89,8 @@ func mergeQuotaHTTPPolicies(opts *ManagerOptions) map[int]httpStatusPolicy {
 		def429 = ParseHTTPErrorAction(opts.QuotaHTTP429Action)
 	}
 	out[429] = httpStatusPolicy{phase: policyPhaseNone, final: def429}
+	/* 默认 401：先重刷一次 token，仍失败则冷却保留账号 */
+	out[401] = httpStatusPolicy{phase: policyPhaseRefreshOnce, final: HTTPErrorActionCooldown}
 	if opts == nil {
 		return out
 	}

@@ -12,7 +12,6 @@ config.yaml
 *.dll
 *.so
 *.dylib
-app
 
 # 参考项目
 CLIProxyAPIPlus/
@@ -25,9 +24,20 @@ CLIProxyAPIPlus/
 *.swp
 *.swo
 *~
+.worktrees/
+.superpowers/
+.run-logs/
+web/node_modules/
+web/*.tsbuildinfo
+web/vite.config.js
+web/vite.config.d.ts
+web/tailwind.config.js
+web/tailwind.config.d.ts
 
 # 系统文件
 .DS_Store
 Thumbs.db
 .serena/project.yml
 codex-proxy
+node_modules
+.cache

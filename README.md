@@ -127,6 +127,39 @@ go build -o codex-proxy .
 
 镜像发布至 `ghcr.io/XxxXTeam/codex-proxy`（amd64 / arm64）。打标签或工作流触发时会推送，详见 [.github/workflows/release.yml](.github/workflows/release.yml)。容器启动与卷挂载的详细步骤见 [docs/DEPLOY.md](docs/DEPLOY.md)。
 
+**默认一键启动（应用 + PostgreSQL）**
+
+```bash
+docker compose up -d --build
+```
+
+启动后默认提供：
+
+- `http://127.0.0.1:8080`：Codex Proxy 服务与管理页面
+- `127.0.0.1:5432`：PostgreSQL
+- `./auths`：宿主机账号目录，会挂载到容器内 `/app/auths`
+
+如未挂载自定义 `config.yaml`，容器会在启动时自动生成默认配置，并自动连接 compose 内的 PostgreSQL。
+
+常用命令：
+
+```bash
+docker compose ps
+docker compose logs -f codex-proxy
+docker compose down
+```
+
+如需覆盖默认数据库账号、端口或后端域名，可在同目录创建 `.env`，例如：
+
+```dotenv
+APP_PORT=8080
+POSTGRES_PORT=5432
+POSTGRES_USER=codex
+POSTGRES_PASSWORD=codex
+POSTGRES_DB=codex_proxy
+BACKEND_DOMAIN=chatgpt.com
+```
+
 ### 6. 调用接口
 
 **Chat Completions**

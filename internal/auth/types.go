@@ -113,6 +113,10 @@ type Account struct {
 
 	/* 上游 429 后的额度恢复流程，防止同一账号堆积多个恢复 goroutine */
 	upstream429Recovering atomic.Int32
+	/* usageKey 用于稳定关联 usage 日聚合，避免账号标识补全后切换 key */
+	usageKey string
+	/* usageRecorder 用于将 usage 事件持久化到日聚合（由 Manager 注入） */
+	usageRecorder func(inputTokens, outputTokens, totalTokens int64, recordedAt time.Time)
 }
 
 /**
@@ -189,6 +193,7 @@ type Auth401RecoverResult struct {
  * @field CooldownUntil - 冷却结束时间
  */
 type AccountStats struct {
+	AccountID           string     `json:"account_id,omitempty"`
 	Email               string     `json:"email"`
 	Status              string     `json:"status"`
 	PlanType            string     `json:"plan_type,omitempty"`
@@ -214,10 +219,41 @@ type AccountStats struct {
  * @field TotalTokens - token 总量
  */
 type UsageStats struct {
-	TotalCompletions int64 `json:"total_completions"`
-	InputTokens      int64 `json:"input_tokens"`
-	OutputTokens     int64 `json:"output_tokens"`
-	TotalTokens      int64 `json:"total_tokens"`
+	TotalCompletions      int64 `json:"total_completions"`
+	InputTokens           int64 `json:"input_tokens"`
+	OutputTokens          int64 `json:"output_tokens"`
+	TotalTokens           int64 `json:"total_tokens"`
+	TodayInputTokens      int64 `json:"today_input_tokens"`
+	TodayOutputTokens     int64 `json:"today_output_tokens"`
+	TodayTotalTokens      int64 `json:"today_total_tokens"`
+	TodayRequestCount     int64 `json:"today_request_count"`
+	SevenDayInputTokens   int64 `json:"seven_day_input_tokens"`
+	SevenDayOutputTokens  int64 `json:"seven_day_output_tokens"`
+	SevenDayTotalTokens   int64 `json:"seven_day_total_tokens"`
+	SevenDayRequestCount  int64 `json:"seven_day_request_count"`
+	ThirtyDayInputTokens  int64 `json:"thirty_day_input_tokens"`
+	ThirtyDayOutputTokens int64 `json:"thirty_day_output_tokens"`
+	ThirtyDayTotalTokens  int64 `json:"thirty_day_total_tokens"`
+	ThirtyDayRequestCount int64 `json:"thirty_day_request_count"`
+	LifetimeInputTokens   int64 `json:"lifetime_input_tokens"`
+	LifetimeOutputTokens  int64 `json:"lifetime_output_tokens"`
+	LifetimeTotalTokens   int64 `json:"lifetime_total_tokens"`
+	LifetimeRequestCount  int64 `json:"lifetime_request_count"`
+}
+
+type UsageBucket struct {
+	InputTokens  int64 `json:"input_tokens"`
+	OutputTokens int64 `json:"output_tokens"`
+	TotalTokens  int64 `json:"total_tokens"`
+	RequestCount int64 `json:"request_count"`
+}
+
+type UsageOverview struct {
+	Today      UsageBucket `json:"today"`
+	SevenDays  UsageBucket `json:"seven_days"`
+	ThirtyDays UsageBucket `json:"thirty_days"`
+	Lifetime   UsageBucket `json:"lifetime"`
+	UpdatedAt  time.Time   `json:"updated_at,omitempty"`
 }
 
 /**
@@ -283,6 +319,30 @@ func (a *Account) GetAccountID() string {
 	return a.Token.AccountID
 }
 
+func (a *Account) GetUsageKey() string {
+	a.mu.RLock()
+	if key := a.usageKey; key != "" {
+		a.mu.RUnlock()
+		return key
+	}
+	accountID := a.Token.AccountID
+	email := a.Token.Email
+	a.mu.RUnlock()
+
+	key := usageAccountKey(accountID, email)
+	if key == "" {
+		return ""
+	}
+
+	a.mu.Lock()
+	if a.usageKey == "" {
+		a.usageKey = key
+	}
+	key = a.usageKey
+	a.mu.Unlock()
+	return key
+}
+
 /**
  * GetEmail 安全获取当前的 Email
  * @returns string - 当前 Email
@@ -339,6 +399,9 @@ func (a *Account) UpdateToken(td TokenData) {
 		}
 	}
 	a.Token = td
+	if a.usageKey == "" {
+		a.usageKey = usageAccountKey(td.AccountID, td.Email)
+	}
 	a.LastRefreshedAt = now
 	a.Status = StatusActive
 	a.LastError = nil
@@ -498,7 +561,11 @@ func (a *Account) RecordUsage(inputTokens, outputTokens, totalTokens int64) {
 	if totalTokens > 0 {
 		a.TotalTokens.Add(totalTokens)
 	} else if inputTokens+outputTokens > 0 {
-		a.TotalTokens.Add(inputTokens + outputTokens)
+		totalTokens = inputTokens + outputTokens
+		a.TotalTokens.Add(totalTokens)
+	}
+	if recorder := a.usageRecorder; recorder != nil {
+		recorder(inputTokens, outputTokens, totalTokens, time.Now())
 	}
 }
 
@@ -582,6 +649,7 @@ func (a *Account) GetStats() AccountStats {
 	}
 
 	return AccountStats{
+		AccountID:           a.Token.AccountID,
 		Email:               a.Token.Email,
 		Status:              statusStr,
 		PlanType:            a.Token.PlanType,
@@ -596,10 +664,14 @@ func (a *Account) GetStats() AccountStats {
 		QuotaResetsAt:       quotaResetsAt,
 		TokenExpire:         a.Token.Expire,
 		Usage: UsageStats{
-			TotalCompletions: a.TotalCompletions.Load(),
-			InputTokens:      a.TotalInputTokens.Load(),
-			OutputTokens:     a.TotalOutputTokens.Load(),
-			TotalTokens:      a.TotalTokens.Load(),
+			TotalCompletions:     a.TotalCompletions.Load(),
+			InputTokens:          a.TotalInputTokens.Load(),
+			OutputTokens:         a.TotalOutputTokens.Load(),
+			TotalTokens:          a.TotalTokens.Load(),
+			LifetimeInputTokens:  a.TotalInputTokens.Load(),
+			LifetimeOutputTokens: a.TotalOutputTokens.Load(),
+			LifetimeTotalTokens:  a.TotalTokens.Load(),
+			LifetimeRequestCount: a.TotalCompletions.Load(),
 		},
 		Quota: a.QuotaInfo,
 	}

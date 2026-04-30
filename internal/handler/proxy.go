@@ -69,6 +69,7 @@ var responsesWSUpgrader = websocket.FastHTTPUpgrader{
 type ProxyHandler struct {
 	manager                   *auth.Manager
 	executor                  *executor.Executor
+	codexOAuth                *auth.CodexOAuthFlow
 	apiKeys                   []string
 	maxRetry                  int
 	enableHealthyRetry        bool
@@ -122,6 +123,7 @@ func NewProxyHandler(manager *auth.Manager, exec *executor.Executor, apiKeys []s
 	return &ProxyHandler{
 		manager:             manager,
 		executor:            exec,
+		codexOAuth:          auth.NewCodexOAuthFlow(proxyURL, enableHTTP2),
 		apiKeys:             apiKeys,
 		maxRetry:            maxRetry,
 		enableHealthyRetry:  enableHealthyRetry,
@@ -152,6 +154,7 @@ func NewProxyHandler(manager *auth.Manager, exec *executor.Executor, apiKeys []s
 func (h *ProxyHandler) RegisterRoutes(r *fasthttprouter.Router) {
 	/* 首页 */
 	r.GET("/", h.handleIndex)
+	r.GET("/assets/{filepath:*}", h.handleStaticAsset)
 
 	/* 健康检查 */
 	r.GET("/health", h.handleHealth)
@@ -192,16 +195,27 @@ func (h *ProxyHandler) RegisterRoutes(r *fasthttprouter.Router) {
 	refreshHandler := h.handleRefresh
 	checkQuotaHandler := h.handleCheckQuota
 	recoverAuthHandler := h.handleRecoverAuth
+	oauthStartHandler := h.handleCodexOAuthStart
+	oauthResultHandler := h.handleCodexOAuthResult
+	oauthCompleteHandler := h.handleCodexOAuthComplete
+	accountsDeleteHandler := h.handleAccountsDelete
 	if len(h.apiKeys) > 0 {
 		statsHandler = h.authMiddleware(h.handleStats)
 		refreshHandler = h.authMiddleware(h.handleRefresh)
 		checkQuotaHandler = h.authMiddleware(h.handleCheckQuota)
 		recoverAuthHandler = h.authMiddleware(h.handleRecoverAuth)
+		oauthStartHandler = h.authMiddleware(h.handleCodexOAuthStart)
+		oauthResultHandler = h.authMiddleware(h.handleCodexOAuthResult)
+		oauthCompleteHandler = h.authMiddleware(h.handleCodexOAuthComplete)
+		accountsDeleteHandler = h.authMiddleware(h.handleAccountsDelete)
 	}
 	r.GET("/stats", statsHandler)
 	r.POST("/refresh", refreshHandler)
 	r.POST("/check-quota", checkQuotaHandler)
 	r.POST("/recover-auth", recoverAuthHandler)
+	r.POST("/oauth/codex/start", oauthStartHandler)
+	r.GET("/oauth/codex/result", oauthResultHandler)
+	r.POST("/oauth/codex/complete", oauthCompleteHandler)
 
 	accountsIngestHandler := h.handleAccountsIngest
 	if len(h.apiKeys) > 0 {
@@ -209,6 +223,7 @@ func (h *ProxyHandler) RegisterRoutes(r *fasthttprouter.Router) {
 	}
 	r.POST("/admin/accounts/ingest", accountsIngestHandler)
 	r.GET("/admin/accounts/ingest", accountsIngestHandler)
+	r.POST("/admin/accounts/delete", accountsDeleteHandler)
 }
 
 /**
@@ -678,11 +693,18 @@ func (h *ProxyHandler) handleStats(ctx *fasthttp.RequestCtx) {
 	accounts := h.manager.GetAccounts()
 	active, cooldown, disabled := 0, 0, 0
 	var totalInputTokens, totalOutputTokens int64
+	usageOverview, accountUsageOverview, usageErr := h.manager.UsageOverviewForAccounts(accounts, time.Now())
+	if usageErr != nil {
+		log.Warnf("加载 usage 聚合概览失败: %v", usageErr)
+	}
 
 	if !pageMode {
 		stats := make([]auth.AccountStats, 0, len(accounts))
 		for _, acc := range accounts {
 			s := acc.GetStats()
+			if usage, ok := accountUsageOverview[acc.GetUsageKey()]; ok {
+				auth.ApplyUsageOverview(&s.Usage, usage)
+			}
 			stats = append(stats, s)
 			totalInputTokens += s.Usage.InputTokens
 			totalOutputTokens += s.Usage.OutputTokens
@@ -695,6 +717,13 @@ func (h *ProxyHandler) handleStats(ctx *fasthttp.RequestCtx) {
 				disabled++
 			}
 		}
+		if usageOverview.Lifetime.TotalTokens == 0 && (totalInputTokens > 0 || totalOutputTokens > 0) {
+			usageOverview.Lifetime = auth.UsageBucket{
+				InputTokens:  totalInputTokens,
+				OutputTokens: totalOutputTokens,
+				TotalTokens:  totalInputTokens + totalOutputTokens,
+			}
+		}
 
 		writeJSON(ctx, fasthttp.StatusOK, map[string]any{
 			"summary": map[string]any{
@@ -705,6 +734,7 @@ func (h *ProxyHandler) handleStats(ctx *fasthttp.RequestCtx) {
 				"rpm":                 GetRPM(),
 				"total_input_tokens":  totalInputTokens,
 				"total_output_tokens": totalOutputTokens,
+				"token_overview":      usageOverview,
 			},
 			"accounts": stats,
 		})
@@ -720,6 +750,9 @@ func (h *ProxyHandler) handleStats(ctx *fasthttp.RequestCtx) {
 
 	for _, acc := range accounts {
 		s := acc.GetStats()
+		if usage, ok := accountUsageOverview[acc.GetUsageKey()]; ok {
+			auth.ApplyUsageOverview(&s.Usage, usage)
+		}
 		totalInputTokens += s.Usage.InputTokens
 		totalOutputTokens += s.Usage.OutputTokens
 		switch s.Status {
@@ -745,6 +778,13 @@ func (h *ProxyHandler) handleStats(ctx *fasthttp.RequestCtx) {
 		}
 		stats = append(stats, s)
 	}
+	if usageOverview.Lifetime.TotalTokens == 0 && (totalInputTokens > 0 || totalOutputTokens > 0) {
+		usageOverview.Lifetime = auth.UsageBucket{
+			InputTokens:  totalInputTokens,
+			OutputTokens: totalOutputTokens,
+			TotalTokens:  totalInputTokens + totalOutputTokens,
+		}
+	}
 
 	totalPages := 1
 	if filteredTotal > 0 {
@@ -760,6 +800,7 @@ func (h *ProxyHandler) handleStats(ctx *fasthttp.RequestCtx) {
 			"rpm":                 GetRPM(),
 			"total_input_tokens":  totalInputTokens,
 			"total_output_tokens": totalOutputTokens,
+			"token_overview":      usageOverview,
 		},
 		"accounts": stats,
 		"pagination": statsPagination{

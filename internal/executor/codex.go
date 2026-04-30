@@ -822,12 +822,24 @@ func (e *Executor) ExecuteNonStream(ctx context.Context, rc RetryConfig, request
 			resStr, hasOutput := translator.ConvertNonStreamResponse(completedEvent, reverseToolMap)
 			if hasOutput && resStr != "" {
 				usage := gjson.GetBytes(completedEvent, "response.usage")
+				var inputTokens, outputTokens, totalTokens int64
 				if usage.Exists() {
-					account.RecordUsage(
-						usage.Get("input_tokens").Int(),
-						usage.Get("output_tokens").Int(),
-						usage.Get("total_tokens").Int(),
-					)
+					inputTokens = usage.Get("input_tokens").Int()
+					outputTokens = usage.Get("output_tokens").Int()
+					totalTokens = usage.Get("total_tokens").Int()
+				}
+				if inputTokens == 0 && outputTokens == 0 {
+					log.Warnf("nonstream usage is 0 or not found, model=%s account=%s response=%s, will estimate from output",
+						baseModel, account.GetEmail(), gjson.GetBytes(completedEvent, "response.id").String())
+					outputTokens = estimateTokensFromOutput(baseModel)
+					totalTokens = outputTokens
+					log.Warnf("nonstream usage estimated output_tokens=%d total=%d model=%s account=%s",
+						outputTokens, totalTokens, baseModel, account.GetEmail())
+				}
+				if inputTokens > 0 || outputTokens > 0 {
+					account.RecordUsage(inputTokens, outputTokens, totalTokens)
+				} else {
+					log.Warnf("nonstream all usage zero, skipping RecordUsage model=%s account=%s", baseModel, account.GetEmail())
 				}
 				result = []byte(resStr)
 				gotValid = true

@@ -2,12 +2,14 @@ package auth
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"strings"
+	"time"
 
 	log "github.com/sirupsen/logrus"
 )
@@ -16,12 +18,20 @@ import (
  * IngestResult 账号导入结果
  */
 type IngestResult struct {
-	Added      int      `json:"added"`
-	Updated    int      `json:"updated"`
-	Failed     int      `json:"failed"`
-	PoolTotal  int      `json:"pool_total"`
-	Errors     []string `json:"errors,omitempty"`
+	Added      int               `json:"added"`
+	Updated    int               `json:"updated"`
+	Failed     int               `json:"failed"`
+	PoolTotal  int               `json:"pool_total"`
+	Errors     []string          `json:"errors,omitempty"`
+	Validation *IngestValidation `json:"validation,omitempty"`
 	maxErrKeep int
+}
+
+type IngestValidation struct {
+	Email     string `json:"email,omitempty"`
+	AccountID string `json:"account_id,omitempty"`
+	Success   bool   `json:"success"`
+	Message   string `json:"message,omitempty"`
 }
 
 const ingestMaxErrors = 48
@@ -200,6 +210,7 @@ func (m *Manager) IngestAccountsFromJSON(body []byte) (IngestResult, error) {
 	}
 
 	var res IngestResult
+	validations := make([]*Account, 0, len(tokens))
 	for i, tf := range tokens {
 		acc, aerr := accountFromTokenFile(&tf, "")
 		if aerr != nil {
@@ -218,14 +229,21 @@ func (m *Manager) IngestAccountsFromJSON(body []byte) (IngestResult, error) {
 			ex.UpdateToken(acc.TokenSnapshot())
 			m.mu.Unlock()
 			m.enqueueSave(ex)
+			if ex.HasRefreshToken() {
+				validations = append(validations, ex)
+			}
 			res.Updated++
 			log.Debugf("账号上传: 更新 ident=%s path=%s has_refresh_token=%t", ingestLogIdent(ex), ex.FilePath, ex.HasRefreshToken())
 		} else {
+			m.attachAccountUsageRecorder(acc)
 			m.accounts = append(m.accounts, acc)
 			m.accountIndex[acc.FilePath] = acc
 			m.publishSnapshot()
 			m.mu.Unlock()
 			m.enqueueSave(acc)
+			if acc.HasRefreshToken() {
+				validations = append(validations, acc)
+			}
 			res.Added++
 			log.Debugf("账号上传: 新增 ident=%s path=%s has_refresh_token=%t", ingestLogIdent(acc), acc.FilePath, acc.HasRefreshToken())
 		}
@@ -238,6 +256,21 @@ func (m *Manager) IngestAccountsFromJSON(body []byte) (IngestResult, error) {
 	m.mu.RUnlock()
 	if res.Added+res.Updated+res.Failed > 0 {
 		log.Debugf("账号上传汇总: 新增=%d 更新=%d 失败=%d 号池合计=%d", res.Added, res.Updated, res.Failed, res.PoolTotal)
+	}
+	if len(validations) > 0 {
+		targets := append([]*Account(nil), validations...)
+		go func() {
+			for _, acc := range targets {
+				ctx, cancel := context.WithTimeout(context.Background(), 35*time.Second)
+				vr := m.ValidateAccountAfterIngest(ctx, acc)
+				cancel()
+				if vr.Success {
+					log.Infof("账号导入后异步校验成功: %s", vr.Email)
+				} else {
+					log.Warnf("账号导入后异步校验失败: %s, 原因: %s", vr.Email, vr.Message)
+				}
+			}
+		}()
 	}
 	return res, nil
 }
