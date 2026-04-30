@@ -17,6 +17,9 @@ config.yaml
 CLIProxyAPIPlus/
 
 *_test.go
+!internal/config/config_test.go
+!internal/httpserver/server_test.go
+!internal/upstream/compression_test.go
 
 # IDE
 .idea/

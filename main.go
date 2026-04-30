@@ -23,7 +23,9 @@ import (
 	codexdb "codex-proxy/internal/db"
 	"codex-proxy/internal/executor"
 	"codex-proxy/internal/handler"
+	"codex-proxy/internal/httpserver"
 	"codex-proxy/internal/static"
+	"codex-proxy/internal/upstream"
 
 	"github.com/fasthttp/router"
 	log "github.com/sirupsen/logrus"
@@ -321,6 +323,10 @@ func main() {
 		TLSHandshakeTimeoutSec:   cfg.UpstreamTLSHandshakeTimeoutSec,
 		HTTP2MaxConnsPerHostCap:  cfg.HTTP2MaxConnsPerHostCap,
 		ResponseHeaderTimeoutSec: cfg.UpstreamResponseHeaderTimeoutSec,
+		UpstreamRequestCompression: upstream.CompressionConfig{
+			Mode:     upstream.CompressionMode(cfg.UpstreamRequestCompression),
+			MinBytes: cfg.UpstreamRequestCompressionMinBytes,
+		},
 	})
 
 	/* 延迟启动连接池保活（在服务启动后异步进行） */
@@ -343,26 +349,16 @@ func main() {
 	appHandler = fasthttpLogger(appHandler)
 
 	/* Read/WriteTimeout=0：长 SSE 对话不在服务端掐写回；IdleTimeout 用 listen-idle-timeout-sec，勿与 shutdown-timeout 混用 */
-	srv := &fasthttp.Server{
-		Handler:          appHandler,
-		Name:             "Codex Proxy",
-		DisableKeepalive: false,
-		Concurrency:      cfg.ListenConcurrency,
-		IdleTimeout:      time.Duration(cfg.ListenIdleTimeoutSec) * time.Second,
-		ReadTimeout:      0,
-		WriteTimeout:     0,
-		/* fasthttp 无单独「读头」超时；此处按配置限制单次请求的读（含 body），与 listen-read-header-timeout-sec 语义接近 */
-		HeaderReceived: func(_ *fasthttp.RequestHeader) fasthttp.RequestConfig {
-			return fasthttp.RequestConfig{
-				ReadTimeout: time.Duration(cfg.ListenReadHeaderTimeoutSec) * time.Second,
-			}
-		},
-		TCPKeepalive:       cfg.ListenTCPKeepaliveSec > 0,
-		TCPKeepalivePeriod: time.Duration(cfg.ListenTCPKeepaliveSec) * time.Second,
-		ReadBufferSize:     cfg.ListenMaxHeaderBytes,
-		MaxConnsPerIP:      0,
-		MaxRequestsPerConn: 0,
-	}
+	srv := httpserver.New(appHandler, httpserver.Options{
+		Name:                    "Codex Proxy",
+		Concurrency:             cfg.ListenConcurrency,
+		IdleTimeout:             time.Duration(cfg.ListenIdleTimeoutSec) * time.Second,
+		ListenReadHeaderTimeout: time.Duration(cfg.ListenReadHeaderTimeoutSec) * time.Second,
+		TCPKeepalive:            cfg.ListenTCPKeepaliveSec > 0,
+		TCPKeepalivePeriod:      time.Duration(cfg.ListenTCPKeepaliveSec) * time.Second,
+		ReadBufferSize:          cfg.ListenMaxHeaderBytes,
+		MaxRequestBodySize:      cfg.ListenMaxRequestBodyBytes,
+	})
 
 	/* 在 goroutine 中启动 HTTP 服务 */
 	go func() {

@@ -4,6 +4,10 @@
 # 监听地址
 listen: ":8080"
 
+# 最大入站请求体字节数。多张本地图片会以 base64 data URL 放入 JSON，容易超过 fasthttp 默认 4 MiB。
+# 默认 128 MiB；若配小于 4 MiB，会自动提升到 4 MiB。
+# listen-max-request-body-bytes: 134217728
+
 # 账号文件目录（存放 JSON 格式的 Codex 账号文件，DB 模式时可留空）
 auth-dir: "./auths"
 
@@ -209,6 +213,11 @@ max-idle-conns-per-host: 512
 # upstream-pool-max-cap: 2048
 # 出站等待响应头超时（秒），0=不限制；上游极慢时勿设过短
 # upstream-response-header-timeout-sec: 0
+# 出站请求体压缩：off | auto | always。多图片大 JSON 默认 auto 使用 zstd 压缩发往 Codex 后端。
+# 若后端或中间代理不接受 Content-Encoding: zstd，可设为 off。
+# upstream-request-compression: "auto"
+# auto 模式下，未压缩请求体达到此字节数才启用 zstd（默认 1 MiB）。
+# upstream-request-compression-min-bytes: 1048576
 # fasthttp 最大并发连接，0=库默认；海量长连接 SSE 时可设如 262144。
 # 若开启 upstream-pool-auto-scale，会按 listen-concurrency 抬升出站 max-conns-per-host（上限仍受 upstream-pool-max-cap 约束）。
 # listen-concurrency: 0

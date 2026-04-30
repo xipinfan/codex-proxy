@@ -20,6 +20,14 @@ import (
 /* DefaultDisabledRecoveryIntervalSec 仅磁盘凭据：周期性恢复 *.json.disabled 并探测 OAuth/额度，失败则删文件，减少残留占盘。YAML 省略本项时使用。设为 0 关闭。 */
 const DefaultDisabledRecoveryIntervalSec = 3600
 
+const (
+	DefaultListenMaxRequestBodyBytes = 128 * 1024 * 1024
+	MinListenMaxRequestBodyBytes     = 4 * 1024 * 1024
+
+	DefaultUpstreamRequestCompression         = "auto"
+	DefaultUpstreamRequestCompressionMinBytes = 1024 * 1024
+)
+
 /**
  * Config 是 Codex 代理服务的顶层配置结构
  * @field Listen - 监听地址，格式为 host:port
@@ -75,10 +83,12 @@ type Config struct {
 	/* UpstreamPoolMaxCap 自适应时单主机并发连接上限，0 表示 2048 */
 	UpstreamPoolMaxCap int `yaml:"upstream-pool-max-cap"`
 	/* UpstreamResponseHeaderTimeoutSec 出站等待响应头超时（秒），0 不限制；可兜住半开连接，长排队模型慎用过短 */
-	UpstreamResponseHeaderTimeoutSec int  `yaml:"upstream-response-header-timeout-sec"`
-	EnableHTTP2                      bool `yaml:"enable-http2"`
-	StartupAsyncLoad                 bool `yaml:"startup-async-load"`
-	StartupLoadRetryInterval         int  `yaml:"startup-load-retry-interval"`
+	UpstreamResponseHeaderTimeoutSec   int    `yaml:"upstream-response-header-timeout-sec"`
+	UpstreamRequestCompression         string `yaml:"upstream-request-compression"`
+	UpstreamRequestCompressionMinBytes int    `yaml:"upstream-request-compression-min-bytes"`
+	EnableHTTP2                        bool   `yaml:"enable-http2"`
+	StartupAsyncLoad                   bool   `yaml:"startup-async-load"`
+	StartupLoadRetryInterval           int    `yaml:"startup-load-retry-interval"`
 	/* StartupLoadBatchSize startup-async-load：磁盘 JSON 每批解析文件数，或 db-enabled 时每批从库读取行数；0 表示内置默认（8000） */
 	StartupLoadBatchSize int `yaml:"startup-load-batch-size"`
 	ShutdownTimeout      int `yaml:"shutdown-timeout"`
@@ -147,6 +157,7 @@ type Config struct {
 	ListenIdleTimeoutSec       int  `yaml:"listen-idle-timeout-sec"`
 	ListenTCPKeepaliveSec      int  `yaml:"listen-tcp-keepalive-sec"`
 	ListenMaxHeaderBytes       int  `yaml:"listen-max-header-bytes"`
+	ListenMaxRequestBodyBytes  int  `yaml:"listen-max-request-body-bytes"`
 	H2MaxConcurrentStreams     int  `yaml:"h2-max-concurrent-streams"`
 	/* ListenConcurrency fasthttp 最大并发连接，0 为库默认；大量长连接 SSE 时可显式提高 */
 	ListenConcurrency int `yaml:"listen-concurrency"`
@@ -165,68 +176,71 @@ func LoadConfig(path string) (*Config, error) {
 	}
 
 	cfg := &Config{
-		Listen:                           ":8080",
-		AuthDir:                          "./auths",
-		DBEnabled:                        false,
-		DBDriver:                         "postgres",
-		DBHost:                           "127.0.0.1",
-		DBPort:                           5432,
-		DBUser:                           "",
-		DBPassword:                       "",
-		DBName:                           "codex_proxy",
-		DBSSLMode:                        "disable",
-		DBDSN:                            "",
-		BackendDomain:                    "",
-		BaseURL:                          "",
-		LogLevel:                         "info",
-		RefreshInterval:                  3000,
-		MaxRetry:                         2,
-		EnableHealthyRetry:               true,
-		HealthCheckInterval:              300,
-		HealthCheckMaxFailures:           3,
-		HealthCheckConcurrency:           5,
-		HealthCheckStartDelay:            45,
-		HealthCheckBatchSize:             20,
-		HealthCheckReqTimeout:            8,
-		DisabledRecoveryIntervalSec:      DefaultDisabledRecoveryIntervalSec,
-		RefreshConcurrency:               50,
-		MaxConnsPerHost:                  12,
-		MaxIdleConns:                     48,
-		MaxIdleConnsPerHost:              8,
-		UpstreamPoolAutoScale:            true,
-		UpstreamPoolMaxCap:               0,
-		UpstreamResponseHeaderTimeoutSec: 0,
-		EnableHTTP2:                      false,
-		StartupAsyncLoad:                 true,
-		StartupLoadRetryInterval:         10,
-		ShutdownTimeout:                  5,
-		AuthScanInterval:                 30,
-		SaveWorkers:                      4,
-		Cooldown401Sec:                   30,
-		Cooldown429Sec:                   60,
-		RefreshSingleTimeoutSec:          30,
-		QuotaCheckConcurrency:            0, /* 0 表示使用 refresh-concurrency */
-		QuotaCheckCacheTTLSec:            30,
-		UpstreamIdleConnTimeoutSec:       0,
-		UpstreamTLSHandshakeTimeoutSec:   0,
-		HTTP2MaxConnsPerHostCap:          0,
-		KeepaliveInterval:                60,
-		EmptyRetryMax:                    2,
-		Selector:                         "round-robin",
-		RefreshBatchSize:                 0,
-		EnableModelSuffixFast:            true,
-		EnableModelSuffix1M:              true,
-		EnableModelSuffixImage:           true,
-		EnableWebSocket:                  true,
-		EnableListenH2C:                  true,
-		OAuthCallbackPort:                1455,
-		OAuthNoBrowser:                   false,
-		EnableCodexLogin:                 true,
-		ListenReadHeaderTimeoutSec:       60,
-		ListenIdleTimeoutSec:             180,
-		ListenTCPKeepaliveSec:            30,
-		ListenMaxHeaderBytes:             1 << 20,
-		H2MaxConcurrentStreams:           1000,
+		Listen:                             ":8080",
+		AuthDir:                            "./auths",
+		DBEnabled:                          false,
+		DBDriver:                           "postgres",
+		DBHost:                             "127.0.0.1",
+		DBPort:                             5432,
+		DBUser:                             "",
+		DBPassword:                         "",
+		DBName:                             "codex_proxy",
+		DBSSLMode:                          "disable",
+		DBDSN:                              "",
+		BackendDomain:                      "",
+		BaseURL:                            "",
+		LogLevel:                           "info",
+		RefreshInterval:                    3000,
+		MaxRetry:                           2,
+		EnableHealthyRetry:                 true,
+		HealthCheckInterval:                300,
+		HealthCheckMaxFailures:             3,
+		HealthCheckConcurrency:             5,
+		HealthCheckStartDelay:              45,
+		HealthCheckBatchSize:               20,
+		HealthCheckReqTimeout:              8,
+		DisabledRecoveryIntervalSec:        DefaultDisabledRecoveryIntervalSec,
+		RefreshConcurrency:                 50,
+		MaxConnsPerHost:                    12,
+		MaxIdleConns:                       48,
+		MaxIdleConnsPerHost:                8,
+		UpstreamPoolAutoScale:              true,
+		UpstreamPoolMaxCap:                 0,
+		UpstreamResponseHeaderTimeoutSec:   0,
+		UpstreamRequestCompression:         DefaultUpstreamRequestCompression,
+		UpstreamRequestCompressionMinBytes: DefaultUpstreamRequestCompressionMinBytes,
+		EnableHTTP2:                        false,
+		StartupAsyncLoad:                   true,
+		StartupLoadRetryInterval:           10,
+		ShutdownTimeout:                    5,
+		AuthScanInterval:                   30,
+		SaveWorkers:                        4,
+		Cooldown401Sec:                     30,
+		Cooldown429Sec:                     60,
+		RefreshSingleTimeoutSec:            30,
+		QuotaCheckConcurrency:              0, /* 0 表示使用 refresh-concurrency */
+		QuotaCheckCacheTTLSec:              30,
+		UpstreamIdleConnTimeoutSec:         0,
+		UpstreamTLSHandshakeTimeoutSec:     0,
+		HTTP2MaxConnsPerHostCap:            0,
+		KeepaliveInterval:                  60,
+		EmptyRetryMax:                      2,
+		Selector:                           "round-robin",
+		RefreshBatchSize:                   0,
+		EnableModelSuffixFast:              true,
+		EnableModelSuffix1M:                true,
+		EnableModelSuffixImage:             true,
+		EnableWebSocket:                    true,
+		EnableListenH2C:                    true,
+		OAuthCallbackPort:                  1455,
+		OAuthNoBrowser:                     false,
+		EnableCodexLogin:                   true,
+		ListenReadHeaderTimeoutSec:         60,
+		ListenIdleTimeoutSec:               180,
+		ListenTCPKeepaliveSec:              30,
+		ListenMaxHeaderBytes:               1 << 20,
+		ListenMaxRequestBodyBytes:          DefaultListenMaxRequestBodyBytes,
+		H2MaxConcurrentStreams:             1000,
 	}
 
 	if err = yaml.Unmarshal(data, cfg); err != nil {
@@ -471,6 +485,12 @@ func (c *Config) Sanitize() {
 	if c.ListenMaxHeaderBytes < 4096 && c.ListenMaxHeaderBytes != 0 {
 		c.ListenMaxHeaderBytes = 4096
 	}
+	if c.ListenMaxRequestBodyBytes <= 0 {
+		c.ListenMaxRequestBodyBytes = DefaultListenMaxRequestBodyBytes
+	}
+	if c.ListenMaxRequestBodyBytes > 0 && c.ListenMaxRequestBodyBytes < MinListenMaxRequestBodyBytes {
+		c.ListenMaxRequestBodyBytes = MinListenMaxRequestBodyBytes
+	}
 	if c.H2MaxConcurrentStreams < 0 {
 		c.H2MaxConcurrentStreams = 1000
 	}
@@ -503,6 +523,18 @@ func (c *Config) Sanitize() {
 	}
 	if c.UpstreamResponseHeaderTimeoutSec > 3600 {
 		c.UpstreamResponseHeaderTimeoutSec = 3600
+	}
+	c.UpstreamRequestCompression = strings.TrimSpace(strings.ToLower(c.UpstreamRequestCompression))
+	switch c.UpstreamRequestCompression {
+	case "off", "auto", "always":
+	case "":
+		c.UpstreamRequestCompression = DefaultUpstreamRequestCompression
+	default:
+		log.Warnf("未知 upstream-request-compression=%q，使用默认 %q", c.UpstreamRequestCompression, DefaultUpstreamRequestCompression)
+		c.UpstreamRequestCompression = DefaultUpstreamRequestCompression
+	}
+	if c.UpstreamRequestCompressionMinBytes <= 0 {
+		c.UpstreamRequestCompressionMinBytes = DefaultUpstreamRequestCompressionMinBytes
 	}
 
 	applyUpstreamPoolAutoscale(c)

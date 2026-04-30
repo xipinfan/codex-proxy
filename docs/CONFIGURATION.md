@@ -106,6 +106,8 @@
 | `max-idle-conns-per-host` | `8`     | 每主机最大空闲连接。                                          |
 | `enable-http2`            | `false` | 出站是否使用 HTTP/2；默认 HTTP/1.1 多连接往往更稳。                  |
 | `keepalive-interval`      | `60`    | 上游连接保活 ping 间隔（秒）。                                  |
+| `upstream-request-compression` | `auto` | 发往 Codex 后端的请求体压缩策略：`off` / `auto` / `always`。`auto` 只压缩较大的 JSON。 |
+| `upstream-request-compression-min-bytes` | `1048576` | `auto` 模式下触发 zstd 压缩的最小未压缩请求体大小。 |
 
 
 ## 启动、关闭与热加载
@@ -131,6 +133,7 @@
 | `listen-idle-timeout-sec`        | `180`     | 空闲超时（秒）；`>0` 时最小约 30。          |
 | `listen-tcp-keepalive-sec`       | `30`      | TCP keepalive（秒）。              |
 | `listen-max-header-bytes`        | `1048576` | 最大请求头字节数。                      |
+| `listen-max-request-body-bytes`  | `134217728` | 最大入站请求体字节数；`≤0` 用默认值，`0 < value < 4 MiB` 会提升到 4 MiB。 |
 | `h2-max-concurrent-streams`      | `1000`    | h2 最大并发流（100–10000）。           |
 
 
@@ -141,6 +144,15 @@
 | ------------------------- | --- | --------------------------------------------------------- |
 | `api-keys`                | 空   | 非空时，客户端需在 `Authorization: Bearer <key>` 中携带其一；**为空则不校验**。 |
 | `quota-check-concurrency` | `0` | `0` 表示使用 `refresh-concurrency`。                           |
+
+
+## 多图片请求建议
+
+Codex 客户端读取本地多张图片时，通常会把图片编码为 `data:image/...;base64,...` 并放进 JSON 请求体。base64 会放大体积，多图请求很容易超过 fasthttp 默认的 4 MiB 入站限制，因此推荐保留默认 `listen-max-request-body-bytes: 134217728`，或按部署内存与实际图片大小调大。
+
+`upstream-request-compression: "auto"` 会在请求体达到 `upstream-request-compression-min-bytes` 后用 zstd 压缩再发往 Codex 后端，适合多图片大 JSON。若上游网关或中间代理不接受 `Content-Encoding: zstd`，可临时设置 `upstream-request-compression: "off"`。
+
+这个功能只优化传输限制与上游请求体压缩，不会缩放、重编码、校验或改写图片内容。
 
 
 ## 管理类 HTTP / WebSocket 接口

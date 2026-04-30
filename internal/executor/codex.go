@@ -22,6 +22,7 @@ import (
 	"codex-proxy/internal/netutil"
 	"codex-proxy/internal/thinking"
 	"codex-proxy/internal/translator"
+	"codex-proxy/internal/upstream"
 
 	"github.com/google/uuid"
 	log "github.com/sirupsen/logrus"
@@ -68,7 +69,8 @@ type HTTPPoolConfig struct {
 	/* HTTP2MaxConnsPerHostCap 覆盖 h2 下单主机连接数上限，0 使用 netutil 内置默认 */
 	HTTP2MaxConnsPerHostCap int
 	/* ResponseHeaderTimeoutSec 等待响应头超时（秒），0 不限制 */
-	ResponseHeaderTimeoutSec int
+	ResponseHeaderTimeoutSec   int
+	UpstreamRequestCompression upstream.CompressionConfig
 }
 
 /**
@@ -78,11 +80,12 @@ type HTTPPoolConfig struct {
  * @field httpClient - 共享的 HTTP 客户端（连接池复用）
  */
 type Executor struct {
-	baseURL              string
-	httpClient           *http.Client
-	keepAliveOnce        sync.Once
-	resolveAddr          string
-	keepaliveIntervalSec int
+	baseURL                    string
+	httpClient                 *http.Client
+	keepAliveOnce              sync.Once
+	resolveAddr                string
+	keepaliveIntervalSec       int
+	upstreamRequestCompression upstream.CompressionConfig
 }
 
 /**
@@ -162,8 +165,9 @@ func NewExecutor(baseURL, proxyURL string, poolCfg HTTPPoolConfig) *Executor {
 			Transport: transport,
 			Timeout:   0, /* 对话 API：不在 Client 层限制整段请求+读 body */
 		},
-		resolveAddr:          strings.TrimSpace(poolCfg.ResolveAddress),
-		keepaliveIntervalSec: keepaliveSec,
+		resolveAddr:                strings.TrimSpace(poolCfg.ResolveAddress),
+		keepaliveIntervalSec:       keepaliveSec,
+		upstreamRequestCompression: poolCfg.UpstreamRequestCompression,
 	}
 }
 
@@ -366,12 +370,17 @@ func IsRetryableStatus(code int) bool {
  * @returns error - 所有重试均失败时返回错误
  */
 func (e *Executor) sendWithRetry(ctx context.Context, rc RetryConfig, model string, apiURL string, codexBody []byte, stream bool) (*http.Response, *auth.Account, int, error) {
+	encoded, encErr := upstream.EncodeRequestBody(codexBody, e.upstreamRequestCompression)
+	if encErr != nil {
+		return nil, nil, 0, fmt.Errorf("%w: encode upstream request body: %w", errCodexBuildRequest, encErr)
+	}
+
 	maxAttempts := rc.MaxRetry + 1
 	excluded := make(map[string]bool, maxAttempts+8)
 	var lastErr error
 	var last429 bool /* 最近一次失败是否为 429 */
 
-	bodyReader := bytes.NewReader(codexBody)
+	bodyReader := bytes.NewReader(encoded.Body)
 	trySend := func(account *auth.Account, attemptOneBased, maxLabel int, pickDur time.Duration) (*http.Response, error) {
 		startAttempt := time.Now()
 		log.Debugf("send attempt %d/%d account=%s model=%s stream=%v", attemptOneBased, maxLabel, account.GetEmail(), model, stream)
@@ -392,6 +401,9 @@ func (e *Executor) sendWithRetry(ctx context.Context, rc RetryConfig, model stri
 				return nil, fmt.Errorf("%w: %w", errCodexBuildRequest, err)
 			}
 			applyCodexHeaders(httpReq, account, stream)
+			for k, v := range encoded.Headers {
+				httpReq.Header.Set(k, v)
+			}
 			buildDur := time.Since(buildStart)
 			dialTarget := effectiveDialTarget(httpReq.URL, e.resolveAddr)
 			log.Debugf("upstream request model=%s stream=%v account=%s attempt=%d/%d method=%s url=%s dial_target=%s", model, stream, account.GetEmail(), attemptOneBased, maxLabel, httpReq.Method, httpReq.URL.String(), dialTarget)
@@ -570,7 +582,7 @@ func (e *Executor) sendWithRetry(ctx context.Context, rc RetryConfig, model stri
 	/* 并发重试：遇 429 后并发用多个账号同时尝试，首个成功者胜出 */
 	if last429 && rc.ConcurrentRetry429 && ctx.Err() == nil {
 		log.Infof("429 并发重试启动: model=%s timeout=%v", model, rc.ConcurrentRetry429Timeout)
-		cResp, cAcc, cAccounts, cErr := e.concurrentRetryAfter429(ctx, rc, model, apiURL, codexBody, stream, excluded)
+		cResp, cAcc, cAccounts, cErr := e.concurrentRetryAfter429WithHeaders(ctx, rc, model, apiURL, encoded.Body, stream, excluded, encoded.Headers)
 		if cErr == nil && cResp != nil {
 			return cResp, cAcc, maxAttempts + 1, nil
 		}
@@ -627,6 +639,18 @@ func (e *Executor) concurrentRetryAfter429(
 	stream bool,
 	excluded map[string]bool,
 ) (*http.Response, *auth.Account, []*auth.Account, error) {
+	return e.concurrentRetryAfter429WithHeaders(parentCtx, rc, model, apiURL, codexBody, stream, excluded, nil)
+}
+
+func (e *Executor) concurrentRetryAfter429WithHeaders(
+	parentCtx context.Context,
+	rc RetryConfig,
+	model, apiURL string,
+	codexBody []byte,
+	stream bool,
+	excluded map[string]bool,
+	headers map[string]string,
+) (*http.Response, *auth.Account, []*auth.Account, error) {
 	timeout := rc.ConcurrentRetry429Timeout
 	if timeout <= 0 {
 		timeout = 30 * time.Second
@@ -681,6 +705,9 @@ func (e *Executor) concurrentRetryAfter429(
 				return
 			}
 			applyCodexHeaders(httpReq, account, stream)
+			for k, v := range headers {
+				httpReq.Header.Set(k, v)
+			}
 
 			log.Debugf("429 并发重试 发送: account=%s model=%s", account.GetEmail(), model)
 			httpResp, err := e.httpClient.Do(httpReq)
