@@ -1135,6 +1135,33 @@ func (m *Manager) PickRecentlySuccessful(model string, excluded map[string]bool)
 	return bestAll, nil
 }
 
+func (m *Manager) PickRecentlySuccessfulOnly(model string, excluded map[string]bool) (*Account, error) {
+	allAccounts := *m.accountsPtr.Load()
+	nowMs := time.Now().UnixMilli()
+	var best *Account
+	var bestMs int64 = -1
+	for _, acc := range allAccounts {
+		if excluded != nil && excluded[acc.FilePath] {
+			continue
+		}
+		if !accountPickableAt(nowMs, model, acc) {
+			continue
+		}
+		ms := acc.lastSuccessUnixMs.Load()
+		if ms <= 0 {
+			continue
+		}
+		if betterRecentSuccess(ms, acc.FilePath, bestMs, best) {
+			bestMs = ms
+			best = acc
+		}
+	}
+	if best == nil {
+		return nil, fmt.Errorf("没有最近成功账号")
+	}
+	return best, nil
+}
+
 /* betterRecentSuccess 比较「更近的成功时间」，时间相同则 FilePath 较小者优先（与原 sort 稳定序一致） */
 func betterRecentSuccess(ms int64, fp string, bestMs int64, best *Account) bool {
 	if best == nil {

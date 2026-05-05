@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"bytes"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -15,6 +16,16 @@ import (
 	"github.com/tidwall/gjson"
 	"github.com/valyala/fasthttp"
 )
+
+type imageKeepaliveTestWriter struct {
+	bytes.Buffer
+	flushes int
+}
+
+func (w *imageKeepaliveTestWriter) Flush() error {
+	w.flushes++
+	return nil
+}
 
 func TestHandleImageGenerationsRejectsUnsupportedModel(t *testing.T) {
 	h := &ProxyHandler{}
@@ -127,5 +138,71 @@ func TestImageGenerationsRouteRecordsModelBlockFromSSEAccessError(t *testing.T) 
 	}
 	if !accounts[0].IsModelBlocked("gpt-image-2", time.Now()) {
 		t.Fatalf("gpt-image-2 should be model-blocked after three SSE access errors")
+	}
+}
+
+func TestImageGenerationKeepaliveStreamsWhitespaceBeforeDelayedJSON(t *testing.T) {
+	results := make(chan imageGenerationHTTPResult, 1)
+	writer := &imageKeepaliveTestWriter{}
+
+	go func() {
+		time.Sleep(30 * time.Millisecond)
+		results <- imageGenerationHTTPResult{
+			statusCode: fasthttp.StatusOK,
+			body:       []byte(`{"created":1,"data":[{"b64_json":"aW1hZ2U="}]}`),
+		}
+	}()
+
+	streamImageGenerationJSONWithKeepalive("test-image", writer, results, 10*time.Millisecond)
+
+	got := writer.String()
+	if !bytes.HasPrefix([]byte(got), []byte("\n")) {
+		t.Fatalf("response should start with JSON whitespace keepalive, got %q", got)
+	}
+	if !gjson.Valid(got) {
+		t.Fatalf("streamed body should remain valid JSON, got %q", got)
+	}
+	if writer.flushes < 2 {
+		t.Fatalf("flushes = %d, want at least 2", writer.flushes)
+	}
+}
+
+func TestBuildImageRetryConfigPrefersRecentlySuccessfulImageAccount(t *testing.T) {
+	authDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(authDir, "a.json"), []byte(`{"access_token":"token-a","email":"a@example.com","type":"codex"}`), 0o600); err != nil {
+		t.Fatalf("write first account: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(authDir, "b.json"), []byte(`{"access_token":"token-b","email":"b@example.com","type":"codex"}`), 0o600); err != nil {
+		t.Fatalf("write second account: %v", err)
+	}
+	manager := auth.NewManager(authDir, nil, "", 3000, auth.NewRoundRobinSelector(), false, nil)
+	if err := manager.LoadAccounts(); err != nil {
+		t.Fatalf("load accounts: %v", err)
+	}
+	accounts := manager.GetAccounts()
+	if len(accounts) != 2 {
+		t.Fatalf("accounts len = %d, want 2", len(accounts))
+	}
+	var successful *auth.Account
+	for _, acc := range accounts {
+		if acc.GetEmail() == "b@example.com" {
+			successful = acc
+			break
+		}
+	}
+	if successful == nil {
+		t.Fatalf("b@example.com account not loaded")
+	}
+	successful.RecordSuccess()
+
+	h := NewProxyHandler(manager, executor.NewExecutor("http://127.0.0.1", "", executor.HTTPPoolConfig{}), nil, 2, true, "", "", false, "", "", 1, 0, nil, false, 0, false, true, true, true, false, false, false, 0, nil)
+	rc := h.buildImageRetryConfig()
+
+	picked, err := rc.PickFn("gpt-image-2", map[string]bool{})
+	if err != nil {
+		t.Fatalf("PickFn() error = %v", err)
+	}
+	if picked.GetEmail() != "b@example.com" {
+		t.Fatalf("picked account = %s, want b@example.com", picked.GetEmail())
 	}
 }
