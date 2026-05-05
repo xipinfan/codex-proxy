@@ -105,6 +105,18 @@ func TestRecordModelFailureIfAccessErrorOnlyBlocksQualifyingErrors(t *testing.T)
 	}
 }
 
+func TestRecordModelFailureIfAccessErrorRecognizesImageToolUnavailable(t *testing.T) {
+	m := newPolicyTestManager(t)
+	acc := addPolicyTestAccount(m, "image-tool-unavailable@example.com")
+	body := []byte(`{"error":{"message":"Tool choice 'image_generation' not found in 'tools' parameter."}}`)
+	for i := 0; i < 3; i++ {
+		m.RecordModelFailureIfAccessError(acc, "gpt-image-2", 400, body)
+	}
+	if !acc.IsModelBlocked("gpt-image-2", time.Now()) {
+		t.Fatalf("image tool unavailable errors should block image model")
+	}
+}
+
 func TestRecordModelFailureIfAccessErrorIgnoresQuotaAndServerErrors(t *testing.T) {
 	m := newPolicyTestManager(t)
 	acc := addPolicyTestAccount(m, "ignored@example.com")

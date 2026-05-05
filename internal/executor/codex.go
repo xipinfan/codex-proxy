@@ -1488,6 +1488,9 @@ func upstreamPrefixIndicatesUsageQuotaExceeded(prefix []byte) bool {
  * shouldSwitchAccountForUpstreamError 是否应在 sendWithRetry 中换号重试（含 400/403+额度 JSON 与常规 429/5xx）。
  */
 func shouldSwitchAccountForUpstreamError(code int, body []byte) bool {
+	if code == http.StatusBadRequest && isImageGenerationToolUnavailableError(body) {
+		return true
+	}
 	if isCodexUsageQuotaExceededJSON(codexQuotaPayloadForCooldown(body)) {
 		switch code {
 		case http.StatusBadRequest, http.StatusForbidden, http.StatusTooManyRequests:
@@ -1495,6 +1498,11 @@ func shouldSwitchAccountForUpstreamError(code int, body []byte) bool {
 		}
 	}
 	return IsRetryableStatus(code)
+}
+
+func isImageGenerationToolUnavailableError(body []byte) bool {
+	msg := strings.ToLower(string(body))
+	return strings.Contains(msg, "image_generation") && strings.Contains(msg, "not found") && strings.Contains(msg, "tools")
 }
 
 /**

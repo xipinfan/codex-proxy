@@ -1243,6 +1243,9 @@ func (m *Manager) RecordModelFailureIfAccessError(acc *Account, model string, st
 }
 
 func looksLikeModelAccessError(msg string) bool {
+	if strings.Contains(msg, "image_generation") && strings.Contains(msg, "not found") && strings.Contains(msg, "tools") {
+		return true
+	}
 	if !strings.Contains(msg, "model") {
 		return false
 	}
