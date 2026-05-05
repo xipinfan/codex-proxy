@@ -2,6 +2,7 @@ package translator
 
 import (
 	"encoding/base64"
+	"strings"
 	"testing"
 
 	"github.com/tidwall/gjson"
@@ -114,5 +115,47 @@ func TestParseCodexImageGenerationSSEFailure(t *testing.T) {
 	_, err := ParseCodexImageGenerationSSE([]byte(body))
 	if err == nil {
 		t.Fatalf("expected failure error")
+	}
+}
+
+func TestSummarizeCodexImageGenerationRequest(t *testing.T) {
+	body, err := BuildCodexImageGenerationRequest(ImageGenerationRequest{
+		Model:        "gpt-image-2",
+		Prompt:       "Draw a small green lighthouse",
+		Size:         "1024x1536",
+		Quality:      "low",
+		OutputFormat: "png",
+	})
+	if err != nil {
+		t.Fatalf("BuildCodexImageGenerationRequest() error = %v", err)
+	}
+
+	got := SummarizeCodexImageGenerationRequest(body)
+	want := "outer_model=gpt-5.5 tool_type=image_generation tool_model=gpt-image-2 size=1024x1536 quality=low output_format=png tool_choice_type=allowed_tools tool_choice_mode=required"
+	if got != want {
+		t.Fatalf("summary = %q, want %q", got, want)
+	}
+}
+
+func TestSummarizeCodexImageGenerationSSE(t *testing.T) {
+	body := `data: {"type":"response.failed","error":{"message":"bad image tool"}}` + "\n\n"
+	got := SummarizeCodexImageGenerationSSE([]byte(body), 200)
+	want := `event=response.failed error="bad image tool" bytes=71`
+	if got != want {
+		t.Fatalf("summary = %q, want %q", got, want)
+	}
+}
+
+func TestSummarizeCodexImageGenerationSSERedactsImageResult(t *testing.T) {
+	body := `data: {"type":"response.output_item.done","item":{"type":"image_generation_call","result":"SECRET_BASE64"}}` + "\n\n" +
+		`data: {"type":"response.completed","response":{"output":[]}}` + "\n\n"
+
+	got := SummarizeCodexImageGenerationSSE([]byte(body), 200)
+	want := "events=2 first=response.output_item.done last=response.completed image_calls=1 has_image_result=true bytes=171"
+	if got != want {
+		t.Fatalf("summary = %q, want %q", got, want)
+	}
+	if strings.Contains(got, "SECRET_BASE64") {
+		t.Fatalf("summary leaked image result: %q", got)
 	}
 }

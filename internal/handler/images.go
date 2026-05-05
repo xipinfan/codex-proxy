@@ -9,6 +9,7 @@ import (
 	"codex-proxy/internal/auth"
 	"codex-proxy/internal/translator"
 
+	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/valyala/fasthttp"
 )
@@ -67,13 +68,20 @@ func (h *ProxyHandler) handleImageGenerations(ctx *fasthttp.RequestCtx) {
 			sendError(ctx, fasthttp.StatusBadRequest, err.Error(), "invalid_request_error")
 			return
 		}
+		log.Infof("image generation upstream request iteration=%d/%d %s", i+1, count, translator.SummarizeCodexImageGenerationRequest(codexBody))
 		raw, account, err := h.executor.ExecuteImageGeneration(context.Background(), rc, codexBody, model)
 		if err != nil {
+			log.Warnf("image generation upstream transport failed iteration=%d/%d model=%s err=%v", i+1, count, model, err)
 			handleExecutorError(ctx, err)
 			return
 		}
 		parsed, err := translator.ParseCodexImageGenerationSSE(raw)
 		if err != nil {
+			accountEmail := ""
+			if account != nil {
+				accountEmail = account.GetEmail()
+			}
+			log.Warnf("image generation parse failed iteration=%d/%d model=%s account=%s err=%v upstream=%s", i+1, count, model, accountEmail, err, translator.SummarizeCodexImageGenerationSSE(raw, 2048))
 			h.recordImageModelFailureFromSSEError(account, model, err)
 			sendError(ctx, fasthttp.StatusBadGateway, err.Error(), "bad_gateway")
 			return

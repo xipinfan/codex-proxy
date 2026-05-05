@@ -187,3 +187,79 @@ func MarshalOpenAIImageResponse(created int64, images []CodexImage) ([]byte, err
 	payload["data"] = data
 	return json.Marshal(payload)
 }
+
+func SummarizeCodexImageGenerationRequest(body []byte) string {
+	root := gjson.ParseBytes(body)
+	parts := []string{
+		"outer_model=" + root.Get("model").String(),
+		"tool_type=" + root.Get("tools.0.type").String(),
+		"tool_model=" + root.Get("tools.0.model").String(),
+		"size=" + root.Get("tools.0.size").String(),
+		"quality=" + root.Get("tools.0.quality").String(),
+		"output_format=" + root.Get("tools.0.output_format").String(),
+		"tool_choice_type=" + root.Get("tool_choice.type").String(),
+		"tool_choice_mode=" + root.Get("tool_choice.mode").String(),
+	}
+	return strings.Join(parts, " ")
+}
+
+func SummarizeCodexImageGenerationSSE(body []byte, maxPrefix int) string {
+	eventCount := 0
+	firstType := ""
+	lastType := ""
+	imageCalls := 0
+	hasImageResult := false
+	for _, line := range strings.Split(string(body), "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		data := strings.TrimSpace(strings.TrimPrefix(line, "data: "))
+		if data == "" || data == "[DONE]" || !gjson.Valid(data) {
+			continue
+		}
+		event := gjson.Parse(data)
+		typ := event.Get("type").String()
+		if typ != "" {
+			eventCount++
+			if firstType == "" {
+				firstType = typ
+			}
+			lastType = typ
+		}
+		item := event.Get("item")
+		if item.Get("type").String() == "image_generation_call" {
+			imageCalls++
+			if item.Get("result").String() != "" {
+				hasImageResult = true
+			}
+		}
+		for _, output := range event.Get("response.output").Array() {
+			if output.Get("type").String() != "image_generation_call" {
+				continue
+			}
+			imageCalls++
+			if output.Get("result").String() != "" {
+				hasImageResult = true
+			}
+		}
+		if typ == "response.failed" || typ == "error" {
+			msg := event.Get("error.message").String()
+			if msg == "" {
+				msg = event.Get("message").String()
+			}
+			if msg != "" {
+				return fmt.Sprintf("event=%s error=%q bytes=%d", typ, msg, len(body))
+			}
+			return fmt.Sprintf("event=%s bytes=%d", typ, len(body))
+		}
+	}
+	if eventCount > 0 {
+		return fmt.Sprintf("events=%d first=%s last=%s image_calls=%d has_image_result=%v bytes=%d", eventCount, firstType, lastType, imageCalls, hasImageResult, len(body))
+	}
+	prefix := strings.TrimSpace(string(body))
+	if maxPrefix > 0 && len(prefix) > maxPrefix {
+		prefix = prefix[:maxPrefix] + "...(truncated)"
+	}
+	return fmt.Sprintf("bytes=%d prefix=%q", len(body), prefix)
+}

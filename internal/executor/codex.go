@@ -993,13 +993,18 @@ func (e *Executor) ExecuteResponsesNonStream(ctx context.Context, rc RetryConfig
 }
 
 func (e *Executor) ExecuteImageGeneration(ctx context.Context, rc RetryConfig, requestBody []byte, model string) ([]byte, *auth.Account, error) {
+	startTotal := time.Now()
 	apiURL := e.baseURL + "/responses"
 	rc.SkipModelAccessClearOnHTTP2xx = true
+	sendStart := time.Now()
 	resp, account, _, err := e.sendWithRetry(ctx, rc, model, apiURL, requestBody, true)
+	sendDur := time.Since(sendStart)
 	if err != nil {
+		log.Warnf("req summary image-generation model=%s account=%s upstream=%v total=%v (send ERR) err=%v", model, imageGenerationAccountEmail(account), sendDur, time.Since(startTotal), err)
 		return nil, nil, err
 	}
 	if resp == nil || resp.Body == nil {
+		log.Warnf("req summary image-generation model=%s account=%s upstream=%v total=%v (empty response)", model, imageGenerationAccountEmail(account), sendDur, time.Since(startTotal))
 		return nil, account, ErrEmptyResponse
 	}
 	defer resp.Body.Close()
@@ -1008,12 +1013,22 @@ func (e *Executor) ExecuteImageGeneration(ctx context.Context, rc RetryConfig, r
 		if account != nil {
 			account.RecordFailure()
 		}
+		log.Warnf("req summary image-generation model=%s account=%s upstream=%v total=%v bytes=%d (read ERR) err=%v", model, imageGenerationAccountEmail(account), sendDur, time.Since(startTotal), len(body), err)
 		return nil, account, wrapReadErr(err)
 	}
 	if len(body) > maxImageGenerationSSEBytes {
+		log.Warnf("req summary image-generation model=%s account=%s upstream=%v total=%v bytes=%d (too large)", model, imageGenerationAccountEmail(account), sendDur, time.Since(startTotal), len(body))
 		return nil, account, fmt.Errorf("codex image generation response exceeded size limit")
 	}
+	log.Infof("req summary image-generation model=%s account=%s upstream=%v total=%v bytes=%d sse=%s", model, imageGenerationAccountEmail(account), sendDur, time.Since(startTotal), len(body), translator.SummarizeCodexImageGenerationSSE(body, 512))
 	return body, account, nil
+}
+
+func imageGenerationAccountEmail(account *auth.Account) string {
+	if account == nil {
+		return ""
+	}
+	return account.GetEmail()
 }
 
 func extractCompletedResponseEvent(body []byte) ([]byte, bool) {
