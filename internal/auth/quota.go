@@ -154,6 +154,7 @@ func (qc *QuotaChecker) CheckAllStream(ctx context.Context, manager *Manager) <-
 				case 1:
 					validCount.Add(1)
 					ok = true
+					manager.enqueueSave(a)
 				case 0:
 					failCount.Add(1)
 				default:
@@ -323,9 +324,13 @@ func (qc *QuotaChecker) checkAccount(ctx context.Context, acc *Account) (verdict
 		if json.Valid(body) {
 			info.RawData = body
 		}
+		planType := quotaSnapshotPlanType(info)
 		acc.mu.Lock()
 		acc.QuotaInfo = info
 		acc.QuotaCheckedAt = now
+		if planType != "" {
+			acc.Token.PlanType = planType
+		}
 		acc.mu.Unlock()
 
 		log.Debugf("账号 [%s] 额度查询成功", email)

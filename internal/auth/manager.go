@@ -664,6 +664,9 @@ func accountFromTokenFile(tf *TokenFile, logicalPath string) (*Account, error) {
 		}
 		planType = jwtPlan
 	}
+	if strings.TrimSpace(tf.PlanType) != "" {
+		planType = strings.ToLower(strings.TrimSpace(tf.PlanType))
+	}
 	acc := &Account{
 		FilePath: logicalPath,
 		Token: TokenData{
@@ -2781,6 +2784,7 @@ func (m *Manager) saveTokenToFile(acc *Account) error {
 		Email:        acc.Token.Email,
 		Type:         "codex",
 		Expire:       acc.Token.Expire,
+		PlanType:     acc.Token.PlanType,
 	}
 	filePath := acc.FilePath
 	acc.mu.RUnlock()

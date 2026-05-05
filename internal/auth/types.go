@@ -55,6 +55,7 @@ type TokenFile struct {
 	Email       string `json:"email"`
 	Type        string `json:"type"`
 	Expire      string `json:"expired"`
+	PlanType    string `json:"plan_type,omitempty"`
 }
 
 /**
@@ -754,6 +755,37 @@ func (a *Account) RefreshUsedPercent() {
 	a.atomicUsedPct.Store(int64(result.Float() * 100))
 }
 
+func quotaSnapshotPlanType(qi *QuotaInfo) string {
+	if qi == nil || !qi.Valid || len(qi.RawData) == 0 {
+		return ""
+	}
+
+	for _, path := range []string{
+		"plan_type",
+		"planType",
+		"account_plan",
+		"accountPlan",
+		"account.plan_type",
+		"account.plan",
+		"user.plan_type",
+		"user.plan",
+		"subscription.plan_type",
+		"subscription.plan",
+	} {
+		if v := strings.ToLower(strings.TrimSpace(gjson.GetBytes(qi.RawData, path).String())); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+func effectivePlanType(planType string, qi *QuotaInfo) string {
+	if v := quotaSnapshotPlanType(qi); v != "" {
+		return v
+	}
+	return planType
+}
+
 /**
  * RecordFailure 记录一次失败请求
  * @returns int - 当前连续失败次数
@@ -799,7 +831,7 @@ func (a *Account) GetStats() AccountStats {
 		Pickable:            availability.Pickable,
 		UnavailableReason:   availability.UnavailableReason,
 		CooldownRemainingMs: availability.CooldownRemainingMs,
-		PlanType:            a.Token.PlanType,
+		PlanType:            effectivePlanType(a.Token.PlanType, a.QuotaInfo),
 		DisableReason:       a.DisableReason,
 		TotalRequests:       a.TotalRequests.Load(),
 		TotalErrors:         a.TotalErrors.Load(),
