@@ -82,7 +82,8 @@ func BuildCodexImageGenerationRequest(req ImageGenerationRequest) ([]byte, error
 	}
 	out, _ = sjson.SetRaw(out, "tools", `[]`)
 	out, _ = sjson.SetRaw(out, "tools.-1", tool)
-	out, _ = sjson.Set(out, "tool_choice.type", "image_generation")
+	choice := `{"type":"allowed_tools","mode":"required","tools":[{"type":"image_generation"}]}`
+	out, _ = sjson.SetRaw(out, "tool_choice", choice)
 	out, _ = sjson.Set(out, "stream", true)
 	out, _ = sjson.Set(out, "store", false)
 	return []byte(out), nil

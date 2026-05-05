@@ -47,6 +47,15 @@ func TestBuildCodexImageGenerationRequest(t *testing.T) {
 	if got := tool.Get("model").String(); got != "gpt-image-2" {
 		t.Fatalf("tool model = %q", got)
 	}
+	if got := root.Get("tool_choice.type").String(); got != "allowed_tools" {
+		t.Fatalf("tool_choice.type = %q", got)
+	}
+	if got := root.Get("tool_choice.mode").String(); got != "required" {
+		t.Fatalf("tool_choice.mode = %q", got)
+	}
+	if got := root.Get("tool_choice.tools.0.type").String(); got != "image_generation" {
+		t.Fatalf("tool_choice.tools.0.type = %q", got)
+	}
 	if got := tool.Get("size").String(); got != "1024x1536" {
 		t.Fatalf("tool size = %q", got)
 	}
@@ -61,9 +70,6 @@ func TestBuildCodexImageGenerationRequest(t *testing.T) {
 	}
 	if got := tool.Get("output_compression").Int(); got != 55 {
 		t.Fatalf("tool output_compression = %d", got)
-	}
-	if got := root.Get("tool_choice.type").String(); got != "image_generation" {
-		t.Fatalf("tool_choice.type = %q", got)
 	}
 }
 
