@@ -43,7 +43,12 @@ type CodexImageGenerationResult struct {
 
 type CodexImage struct {
 	Base64        string
+	URL           string
 	RevisedPrompt string
+}
+
+func (image CodexImage) hasImage() bool {
+	return image.Base64 != "" || image.URL != ""
 }
 
 func BuildCodexImageGenerationRequest(req ImageGenerationRequest) ([]byte, error) {
@@ -154,7 +159,7 @@ func ParseCodexImageGenerationSSE(body []byte) (CodexImageGenerationResult, erro
 		if item.Get("type").String() != "image_generation_call" {
 			continue
 		}
-		if img := imageFromResult(item); img.Base64 != "" {
+		if img := imageFromResult(item); img.hasImage() {
 			images = append(images, img)
 			if len(images) >= MaxImageResults {
 				break
@@ -170,7 +175,7 @@ func ParseCodexImageGenerationSSE(body []byte) (CodexImageGenerationResult, erro
 				if item.Get("type").String() != "image_generation_call" {
 					continue
 				}
-				if img := imageFromResult(item); img.Base64 != "" {
+				if img := imageFromResult(item); img.hasImage() {
 					images = append(images, img)
 					if len(images) >= MaxImageResults {
 						break
@@ -186,14 +191,36 @@ func ParseCodexImageGenerationSSE(body []byte) (CodexImageGenerationResult, erro
 }
 
 func imageFromResult(item gjson.Result) CodexImage {
-	result := item.Get("result").String()
+	image := imageFromCodexResult(item.Get("result").String())
+	image.RevisedPrompt = item.Get("revised_prompt").String()
+	return image
+}
+
+func imageFromCodexResult(result string) CodexImage {
+	result = strings.TrimSpace(result)
 	if result == "" {
 		return CodexImage{}
 	}
-	return CodexImage{
-		Base64:        result,
-		RevisedPrompt: item.Get("revised_prompt").String(),
+	lower := strings.ToLower(result)
+	if strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://") {
+		return CodexImage{URL: result}
 	}
+	if strings.HasPrefix(lower, "data:") {
+		comma := strings.Index(result, ",")
+		if comma < 0 {
+			return CodexImage{}
+		}
+		metadata := strings.ToLower(result[:comma])
+		if !strings.Contains(metadata, ";base64") {
+			return CodexImage{}
+		}
+		return CodexImage{Base64: compactBase64(result[comma+1:])}
+	}
+	return CodexImage{Base64: compactBase64(result)}
+}
+
+func compactBase64(value string) string {
+	return strings.Join(strings.Fields(value), "")
 }
 
 func MarshalOpenAIImageResponse(created int64, images []CodexImage) ([]byte, error) {
@@ -203,7 +230,12 @@ func MarshalOpenAIImageResponse(created int64, images []CodexImage) ([]byte, err
 	}
 	data := payload["data"].([]map[string]string)
 	for _, image := range images {
-		item := map[string]string{"b64_json": image.Base64}
+		item := map[string]string{}
+		if image.URL != "" {
+			item["url"] = image.URL
+		} else {
+			item["b64_json"] = image.Base64
+		}
 		if image.RevisedPrompt != "" {
 			item["revised_prompt"] = image.RevisedPrompt
 		}

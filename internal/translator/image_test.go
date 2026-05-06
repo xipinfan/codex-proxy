@@ -124,6 +124,53 @@ func TestParseCodexImageGenerationSSEOutputItem(t *testing.T) {
 	}
 }
 
+func TestMarshalOpenAIImageResponseStripsDataURLResult(t *testing.T) {
+	image := base64.StdEncoding.EncodeToString([]byte("png-bytes"))
+	body := `data: {"type":"response.output_item.done","item":{"type":"image_generation_call","result":"data:image/png;base64,` + image + `","revised_prompt":"clean prompt"}}` + "\n\n"
+
+	result, err := ParseCodexImageGenerationSSE([]byte(body))
+	if err != nil {
+		t.Fatalf("ParseCodexImageGenerationSSE() error = %v", err)
+	}
+	payload, err := MarshalOpenAIImageResponse(123, result.Images)
+	if err != nil {
+		t.Fatalf("MarshalOpenAIImageResponse() error = %v", err)
+	}
+
+	root := gjson.ParseBytes(payload)
+	if got := root.Get("data.0.b64_json").String(); got != image {
+		t.Fatalf("b64_json = %q, want %q", got, image)
+	}
+	if strings.Contains(root.Get("data.0.b64_json").String(), "data:image") {
+		t.Fatalf("b64_json should not include a data URL prefix")
+	}
+	if got := root.Get("data.0.revised_prompt").String(); got != "clean prompt" {
+		t.Fatalf("revised prompt = %q", got)
+	}
+}
+
+func TestMarshalOpenAIImageResponseUsesURLForRemoteResult(t *testing.T) {
+	imageURL := "https://example.com/generated.png"
+	body := `data: {"type":"response.output_item.done","item":{"type":"image_generation_call","result":"` + imageURL + `"}}` + "\n\n"
+
+	result, err := ParseCodexImageGenerationSSE([]byte(body))
+	if err != nil {
+		t.Fatalf("ParseCodexImageGenerationSSE() error = %v", err)
+	}
+	payload, err := MarshalOpenAIImageResponse(123, result.Images)
+	if err != nil {
+		t.Fatalf("MarshalOpenAIImageResponse() error = %v", err)
+	}
+
+	root := gjson.ParseBytes(payload)
+	if got := root.Get("data.0.url").String(); got != imageURL {
+		t.Fatalf("url = %q, want %q", got, imageURL)
+	}
+	if root.Get("data.0.b64_json").Exists() {
+		t.Fatalf("remote image result should not be returned as b64_json")
+	}
+}
+
 func TestParseCodexImageGenerationSSECompletedOutput(t *testing.T) {
 	image := base64.StdEncoding.EncodeToString([]byte("completed-png-bytes"))
 	body := `data: {"type":"response.completed","response":{"output":[{"type":"image_generation_call","result":"` + image + `"}]}}` + "\n\n"
