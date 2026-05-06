@@ -2,6 +2,8 @@ package handler
 
 import (
 	"bytes"
+	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -98,6 +100,70 @@ func TestImageGenerationsRouteReturnsB64JSON(t *testing.T) {
 	}
 	if got := accounts[0].GetStats().TotalRequests; got != 1 {
 		t.Fatalf("account total requests = %d, want 1", got)
+	}
+}
+
+func TestImageEditsRouteForwardsMultipartImageAsReference(t *testing.T) {
+	var upstreamBody []byte
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(`data: {"type":"response.output_item.done","item":{"type":"image_generation_call","result":"ZWRpdGVk"}}` + "\n\n"))
+	}))
+	defer upstream.Close()
+
+	authDir := t.TempDir()
+	accountPath := filepath.Join(authDir, "acc.json")
+	if err := os.WriteFile(accountPath, []byte(`{"access_token":"token","email":"a@example.com","type":"codex"}`), 0o600); err != nil {
+		t.Fatalf("write account: %v", err)
+	}
+	manager := auth.NewManager(authDir, nil, "", 3000, auth.NewRoundRobinSelector(), false, nil)
+	if err := manager.LoadAccounts(); err != nil {
+		t.Fatalf("load accounts: %v", err)
+	}
+	h := NewProxyHandler(manager, executor.NewExecutor(upstream.URL, "", executor.HTTPPoolConfig{}), nil, 0, false, "", upstream.URL, false, "", "", 1, 0, nil, false, 0, false, true, true, true, false, false, false, 0, nil)
+
+	r := fasthttprouter.New()
+	h.RegisterRoutes(r)
+
+	var form bytes.Buffer
+	mw := multipart.NewWriter(&form)
+	if err := mw.WriteField("model", "gpt-image-2"); err != nil {
+		t.Fatalf("write model field: %v", err)
+	}
+	if err := mw.WriteField("prompt", "edit this"); err != nil {
+		t.Fatalf("write prompt field: %v", err)
+	}
+	fw, err := mw.CreateFormFile("image", "reference.png")
+	if err != nil {
+		t.Fatalf("create image field: %v", err)
+	}
+	if _, err := fw.Write([]byte("png-bytes")); err != nil {
+		t.Fatalf("write image: %v", err)
+	}
+	if err := mw.Close(); err != nil {
+		t.Fatalf("close multipart: %v", err)
+	}
+
+	var ctx fasthttp.RequestCtx
+	ctx.Request.Header.SetMethod("POST")
+	ctx.Request.SetRequestURI("/v1/images/edits")
+	ctx.Request.Header.SetContentType(mw.FormDataContentType())
+	ctx.Request.SetBody(form.Bytes())
+	r.Handler(&ctx)
+
+	if ctx.Response.StatusCode() != fasthttp.StatusOK {
+		t.Fatalf("status = %d body=%s", ctx.Response.StatusCode(), ctx.Response.Body())
+	}
+	if got := gjson.GetBytes(ctx.Response.Body(), "data.0.b64_json").String(); got != "ZWRpdGVk" {
+		t.Fatalf("b64_json = %q", got)
+	}
+	root := gjson.ParseBytes(upstreamBody)
+	if got := root.Get("input.0.content.1.type").String(); got != "input_image" {
+		t.Fatalf("upstream image content type = %q, want input_image; body=%s", got, upstreamBody)
+	}
+	if got := root.Get("input.0.content.1.image_url").String(); got != "data:image/png;base64,cG5nLWJ5dGVz" {
+		t.Fatalf("upstream image_url = %q", got)
 	}
 }
 

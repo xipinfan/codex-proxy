@@ -185,6 +185,12 @@ func (h *ProxyHandler) RegisterRoutes(r *fasthttprouter.Router) {
 	}
 	r.POST("/v1/images/generations", apiImageGenerations)
 
+	apiImageEdits := h.handleImageEdits
+	if len(h.apiKeys) > 0 {
+		apiImageEdits = h.authMiddleware(h.handleImageEdits)
+	}
+	r.POST("/v1/images/edits", apiImageEdits)
+
 	apiMessages := h.handleMessages
 	if len(h.apiKeys) > 0 {
 		apiMessages = h.authMiddleware(h.handleMessages)

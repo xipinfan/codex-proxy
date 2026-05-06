@@ -10,14 +10,14 @@ import (
 
 func TestBuildCodexImageGenerationRequest(t *testing.T) {
 	req := ImageGenerationRequest{
-		Model:            "gpt-image-2",
-		Prompt:           "Draw a small green lighthouse",
-		Size:             "1024x1536",
-		Quality:          "low",
-		OutputFormat:     "jpeg",
-		Background:       "opaque",
+		Model:             "gpt-image-2",
+		Prompt:            "Draw a small green lighthouse",
+		Size:              "1024x1536",
+		Quality:           "low",
+		OutputFormat:      "jpeg",
+		Background:        "opaque",
 		OutputCompression: 55,
-		HasCompression:   true,
+		HasCompression:    true,
 	}
 
 	body, err := BuildCodexImageGenerationRequest(req)
@@ -71,6 +71,36 @@ func TestBuildCodexImageGenerationRequest(t *testing.T) {
 	}
 	if got := tool.Get("output_compression").Int(); got != 55 {
 		t.Fatalf("tool output_compression = %d", got)
+	}
+}
+
+func TestBuildCodexImageGenerationRequestWithReferenceImage(t *testing.T) {
+	image := base64.StdEncoding.EncodeToString([]byte("png-bytes"))
+	req := ImageGenerationRequest{
+		Model:  "gpt-image-2",
+		Prompt: "Edit this image",
+		Images: []ImageInput{{
+			MIMEType: "image/png",
+			Base64:   image,
+		}},
+	}
+
+	body, err := BuildCodexImageGenerationRequest(req)
+	if err != nil {
+		t.Fatalf("BuildCodexImageGenerationRequest() error = %v", err)
+	}
+
+	root := gjson.ParseBytes(body)
+	if got := root.Get("input.0.content.0.type").String(); got != "input_text" {
+		t.Fatalf("first content type = %q, want input_text", got)
+	}
+	imagePart := root.Get("input.0.content.1")
+	if got := imagePart.Get("type").String(); got != "input_image" {
+		t.Fatalf("image content type = %q, want input_image", got)
+	}
+	wantURL := "data:image/png;base64," + image
+	if got := imagePart.Get("image_url").String(); got != wantURL {
+		t.Fatalf("image_url = %q, want %q", got, wantURL)
 	}
 }
 

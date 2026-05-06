@@ -28,6 +28,13 @@ type ImageGenerationRequest struct {
 	Background        string
 	OutputCompression int
 	HasCompression    bool
+	Images            []ImageInput
+}
+
+type ImageInput struct {
+	MIMEType string
+	Base64   string
+	URL      string
 }
 
 type CodexImageGenerationResult struct {
@@ -62,6 +69,24 @@ func BuildCodexImageGenerationRequest(req ImageGenerationRequest) ([]byte, error
 	content, _ = sjson.Set(content, "type", "input_text")
 	content, _ = sjson.Set(content, "text", prompt)
 	item, _ = sjson.SetRaw(item, "content.-1", content)
+	for _, img := range req.Images {
+		imageURL := strings.TrimSpace(img.URL)
+		if imageURL == "" {
+			data := strings.TrimSpace(img.Base64)
+			if data == "" {
+				continue
+			}
+			mimeType := strings.TrimSpace(img.MIMEType)
+			if mimeType == "" {
+				mimeType = "image/png"
+			}
+			imageURL = "data:" + mimeType + ";base64," + data
+		}
+		part := `{}`
+		part, _ = sjson.Set(part, "type", "input_image")
+		part, _ = sjson.Set(part, "image_url", imageURL)
+		item, _ = sjson.SetRaw(item, "content.-1", part)
+	}
 	out, _ = sjson.SetRaw(out, "input.-1", item)
 
 	tool := `{}`
