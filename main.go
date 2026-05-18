@@ -472,6 +472,9 @@ func exportAccountsToJSON(cfg *config.Config) error {
 		return fmt.Errorf("数据库连接失败: %v", err)
 	}
 	defer db.Close()
+	if err := codexdb.SetupSchema(db, dialect); err != nil {
+		return fmt.Errorf("数据库结构初始化失败: %v", err)
+	}
 
 	/* 从数据库读取所有账号 */
 	accounts, err := loadAllAccountsFromDB(db, dialect)
@@ -554,7 +557,7 @@ func loadAllAccountsFromDB(db *sql.DB, dialect codexdb.Dialect) ([]*auth.Account
 	/* 使用 account_id 和 email 作为唯一标识，而非 file_path（数据库中无此列） */
 	rows, err := db.Query(`
 		SELECT id, account_id, email, id_token, access_token, refresh_token, 
-		       expire, last_refresh, status, cooldown_until, disable_reason, last_used_at
+		       expire, plan_type, subscription_active_start, subscription_active_until, last_refresh, status, cooldown_until, disable_reason, last_used_at
 		FROM codex_accounts
 		ORDER BY id DESC
 	`)
@@ -566,15 +569,15 @@ func loadAllAccountsFromDB(db *sql.DB, dialect codexdb.Dialect) ([]*auth.Account
 	var accounts []*auth.Account
 	for rows.Next() {
 		var (
-			id                                                                          int64
-			accountID, email, idToken, accessToken, refreshToken, expire, disableReason sql.NullString
-			lastRefresh, cooldownUntil, lastUsedAt                                      sql.NullTime
-			status                                                                      sql.NullInt32
+			id                                                                                                                                      int64
+			accountID, email, idToken, accessToken, refreshToken, expire, planType, subscriptionActiveStart, subscriptionActiveUntil, disableReason sql.NullString
+			lastRefresh, cooldownUntil, lastUsedAt                                                                                                  sql.NullTime
+			status                                                                                                                                  sql.NullInt32
 		)
 
 		if err := rows.Scan(
 			&id, &accountID, &email, &idToken, &accessToken, &refreshToken,
-			&expire, &lastRefresh, &status, &cooldownUntil, &disableReason, &lastUsedAt,
+			&expire, &planType, &subscriptionActiveStart, &subscriptionActiveUntil, &lastRefresh, &status, &cooldownUntil, &disableReason, &lastUsedAt,
 		); err != nil {
 			log.Warnf("扫描数据库行失败: %v", err)
 			continue
@@ -584,12 +587,15 @@ func loadAllAccountsFromDB(db *sql.DB, dialect codexdb.Dialect) ([]*auth.Account
 		acc := &auth.Account{
 			FilePath: "", /* 数据库中无此列，导出时用邮箱或 account_id 作文件名 */
 			Token: auth.TokenData{
-				IDToken:      idToken.String,
-				AccessToken:  accessToken.String,
-				RefreshToken: refreshToken.String,
-				AccountID:    accountID.String,
-				Email:        email.String,
-				Expire:       expire.String,
+				IDToken:                 idToken.String,
+				AccessToken:             accessToken.String,
+				RefreshToken:            refreshToken.String,
+				AccountID:               accountID.String,
+				Email:                   email.String,
+				Expire:                  expire.String,
+				PlanType:                planType.String,
+				SubscriptionActiveStart: subscriptionActiveStart.String,
+				SubscriptionActiveUntil: subscriptionActiveUntil.String,
 			},
 		}
 

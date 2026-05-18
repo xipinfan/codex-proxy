@@ -87,4 +87,20 @@ describe('adaptStatsResponse', () => {
     expect(adapted.accounts[0].cooldownRemainingMs).toBe(0);
     expect(adapted.accounts[0].unavailableReason).toBe('');
   });
+
+  it('maps subscription active window fields', () => {
+    const adapted = adaptStatsResponse({
+      accounts: [
+        {
+          email: 'pro@example.com',
+          status: 'active',
+          subscription_active_start: '2026-05-01T00:00:00Z',
+          subscription_active_until: '2026-06-01T00:00:00Z',
+        },
+      ],
+    });
+
+    expect(adapted.accounts[0].subscriptionActiveStart).toBe('2026-05-01T00:00:00Z');
+    expect(adapted.accounts[0].subscriptionActiveUntil).toBe('2026-06-01T00:00:00Z');
+  });
 });

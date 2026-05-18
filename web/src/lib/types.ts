@@ -83,6 +83,8 @@ export interface AccountView {
   quotaExhausted?: boolean;
   quotaResetsAt?: string | null;
   tokenExpire?: string;
+  subscriptionActiveStart?: string | null;
+  subscriptionActiveUntil?: string | null;
   usage: UsageView;
   quota?: QuotaView | null;
 }
@@ -185,6 +187,8 @@ export interface AccountStatsResponse {
   quota_exhausted?: boolean;
   quota_resets_at?: string;
   token_expire?: string;
+  subscription_active_start?: string;
+  subscription_active_until?: string;
   usage?: UsageStatsResponse;
   quota?: QuotaInfoResponse | null;
 }

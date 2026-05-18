@@ -27,6 +27,8 @@ CREATE TABLE IF NOT EXISTS codex_accounts (
 	refresh_token MEDIUMTEXT,
 	expire VARCHAR(128),
 	plan_type VARCHAR(128),
+	subscription_active_start VARCHAR(128),
+	subscription_active_until VARCHAR(128),
 	last_refresh DATETIME(6) NULL,
 	status TINYINT DEFAULT 0,
 	cooldown_until DATETIME(6) NULL,
@@ -47,6 +49,8 @@ CREATE TABLE IF NOT EXISTS codex_accounts (
 	refresh_token TEXT,
 	expire TEXT,
 	plan_type TEXT,
+	subscription_active_start TEXT,
+	subscription_active_until TEXT,
 	last_refresh TEXT,
 	status INTEGER DEFAULT 0,
 	cooldown_until TEXT,
@@ -65,6 +69,8 @@ CREATE TABLE IF NOT EXISTS codex_accounts (
 	refresh_token TEXT,
 	expire TEXT,
 	plan_type TEXT,
+	subscription_active_start TEXT,
+	subscription_active_until TEXT,
 	last_refresh TIMESTAMPTZ,
 	status SMALLINT DEFAULT 0,
 	cooldown_until TIMESTAMPTZ,
@@ -150,21 +156,21 @@ CREATE TABLE IF NOT EXISTS codex_usage_daily (
 func migrateAddStatusColumns(db *sql.DB, d Dialect) error {
 	switch d {
 	case DialectMySQL:
-		newCols := []string{"status", "cooldown_until", "disable_reason", "last_used_at"}
+		newCols := []string{"status", "cooldown_until", "disable_reason", "last_used_at", "subscription_active_start", "subscription_active_until"}
 		for _, col := range newCols {
 			if err := addColumnIfNotExists(db, d, col); err != nil {
 				return fmt.Errorf("add column %s: %w", col, err)
 			}
 		}
 	case DialectSQLite:
-		newCols := []string{"status", "cooldown_until", "disable_reason", "last_used_at"}
+		newCols := []string{"status", "cooldown_until", "disable_reason", "last_used_at", "subscription_active_start", "subscription_active_until"}
 		for _, col := range newCols {
 			if err := addColumnIfNotExists(db, d, col); err != nil {
 				return fmt.Errorf("add column %s: %w", col, err)
 			}
 		}
 	default: /* PostgreSQL */
-		newCols := []string{"status", "cooldown_until", "disable_reason", "last_used_at"}
+		newCols := []string{"status", "cooldown_until", "disable_reason", "last_used_at", "subscription_active_start", "subscription_active_until"}
 		for _, col := range newCols {
 			if err := addColumnIfNotExists(db, d, col); err != nil {
 				return fmt.Errorf("add column %s: %w", col, err)
@@ -197,6 +203,13 @@ func addColumnIfNotExists(db *sql.DB, d Dialect, colName string) error {
 		}
 	case "disable_reason":
 		colDef = "VARCHAR(128)"
+	case "subscription_active_start", "subscription_active_until":
+		switch d {
+		case DialectMySQL:
+			colDef = "VARCHAR(128)"
+		default:
+			colDef = "TEXT"
+		}
 	case "last_used_at":
 		switch d {
 		case DialectMySQL:

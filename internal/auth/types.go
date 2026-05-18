@@ -24,13 +24,15 @@ import (
  * @field Expire - 访问令牌过期时间戳（RFC3339格式）
  */
 type TokenData struct {
-	IDToken      string `json:"id_token"`
-	AccessToken  string `json:"access_token"`
-	RefreshToken string `json:"refresh_token"`
-	AccountID    string `json:"account_id"`
-	Email        string `json:"email"`
-	Expire       string `json:"expired"`
-	PlanType     string `json:"plan_type,omitempty"`
+	IDToken                 string `json:"id_token"`
+	AccessToken             string `json:"access_token"`
+	RefreshToken            string `json:"refresh_token"`
+	AccountID               string `json:"account_id"`
+	Email                   string `json:"email"`
+	Expire                  string `json:"expired"`
+	PlanType                string `json:"plan_type,omitempty"`
+	SubscriptionActiveStart string `json:"subscription_active_start,omitempty"`
+	SubscriptionActiveUntil string `json:"subscription_active_until,omitempty"`
 }
 
 /**
@@ -49,13 +51,15 @@ type TokenFile struct {
 	AccessToken  string `json:"access_token"`
 	RefreshToken string `json:"refresh_token"`
 	/* RK 与 refresh_token 等价；JSON 中 null 与省略 unmarsh 后均为空串 */
-	RK          string `json:"rk"`
-	AccountID   string `json:"account_id"`
-	LastRefresh string `json:"last_refresh"`
-	Email       string `json:"email"`
-	Type        string `json:"type"`
-	Expire      string `json:"expired"`
-	PlanType    string `json:"plan_type,omitempty"`
+	RK                      string `json:"rk"`
+	AccountID               string `json:"account_id"`
+	LastRefresh             string `json:"last_refresh"`
+	Email                   string `json:"email"`
+	Type                    string `json:"type"`
+	Expire                  string `json:"expired"`
+	PlanType                string `json:"plan_type,omitempty"`
+	SubscriptionActiveStart string `json:"subscription_active_start,omitempty"`
+	SubscriptionActiveUntil string `json:"subscription_active_until,omitempty"`
 }
 
 /**
@@ -190,16 +194,16 @@ const (
 type Auth401RecoverStatus string
 
 const (
-	Auth401RecoverInvalid            Auth401RecoverStatus = "invalid_input"
-	Auth401RecoverSkippedBusy        Auth401RecoverStatus = "skipped_busy"
-	Auth401RecoverRefreshed          Auth401RecoverStatus = "refreshed"
-	Auth401RecoverWaitedRefreshIdle  Auth401RecoverStatus = "waited_refresh_idle"
+	Auth401RecoverInvalid           Auth401RecoverStatus = "invalid_input"
+	Auth401RecoverSkippedBusy       Auth401RecoverStatus = "skipped_busy"
+	Auth401RecoverRefreshed         Auth401RecoverStatus = "refreshed"
+	Auth401RecoverWaitedRefreshIdle Auth401RecoverStatus = "waited_refresh_idle"
 	/* Auth401RecoverRefreshFailedCooldown 刷新失败且策略落地为冷却（含 401/429 等），并非 Token 已恢复 */
 	Auth401RecoverRefreshFailedCooldown Auth401RecoverStatus = "refresh_failed_cooldown"
 	/* Auth401RecoverCooldown429OK 历史兼容；新逻辑请用 refresh_failed_cooldown 或 refreshed */
-	Auth401RecoverCooldown429OK      Auth401RecoverStatus = "cooldown_429_quota_ok"
-	Auth401RecoverDisabled            Auth401RecoverStatus = "disabled"
-	Auth401RecoverRemoved             Auth401RecoverStatus = "removed"
+	Auth401RecoverCooldown429OK Auth401RecoverStatus = "cooldown_429_quota_ok"
+	Auth401RecoverDisabled      Auth401RecoverStatus = "disabled"
+	Auth401RecoverRemoved       Auth401RecoverStatus = "removed"
 )
 
 /**
@@ -225,26 +229,28 @@ type Auth401RecoverResult struct {
  * @field CooldownUntil - 冷却结束时间
  */
 type AccountStats struct {
-	AccountID           string     `json:"account_id,omitempty"`
-	Email               string     `json:"email"`
-	Status              string     `json:"status"`
-	StoredStatus        string     `json:"stored_status,omitempty"`
-	Pickable            bool       `json:"pickable"`
-	UnavailableReason   string     `json:"unavailable_reason,omitempty"`
-	CooldownRemainingMs int64      `json:"cooldown_remaining_ms"`
-	PlanType            string     `json:"plan_type,omitempty"`
-	DisableReason       string     `json:"disable_reason,omitempty"`
-	TotalRequests       int64      `json:"total_requests"`
-	TotalErrors         int64      `json:"total_errors"`
-	ConsecutiveFailures int        `json:"consecutive_failures"`
-	LastUsedAt          time.Time  `json:"last_used_at,omitempty"`
-	LastRefreshedAt     time.Time  `json:"last_refreshed_at,omitempty"`
-	CooldownUntil       time.Time  `json:"cooldown_until,omitempty"`
-	QuotaExhausted      bool       `json:"quota_exhausted"`
-	QuotaResetsAt       time.Time  `json:"quota_resets_at,omitempty"`
-	TokenExpire         string     `json:"token_expire,omitempty"`
-	Usage               UsageStats `json:"usage"`
-	Quota               *QuotaInfo `json:"quota,omitempty"`
+	AccountID               string     `json:"account_id,omitempty"`
+	Email                   string     `json:"email"`
+	Status                  string     `json:"status"`
+	StoredStatus            string     `json:"stored_status,omitempty"`
+	Pickable                bool       `json:"pickable"`
+	UnavailableReason       string     `json:"unavailable_reason,omitempty"`
+	CooldownRemainingMs     int64      `json:"cooldown_remaining_ms"`
+	PlanType                string     `json:"plan_type,omitempty"`
+	DisableReason           string     `json:"disable_reason,omitempty"`
+	TotalRequests           int64      `json:"total_requests"`
+	TotalErrors             int64      `json:"total_errors"`
+	ConsecutiveFailures     int        `json:"consecutive_failures"`
+	LastUsedAt              time.Time  `json:"last_used_at,omitempty"`
+	LastRefreshedAt         time.Time  `json:"last_refreshed_at,omitempty"`
+	CooldownUntil           time.Time  `json:"cooldown_until,omitempty"`
+	QuotaExhausted          bool       `json:"quota_exhausted"`
+	QuotaResetsAt           time.Time  `json:"quota_resets_at,omitempty"`
+	TokenExpire             string     `json:"token_expire,omitempty"`
+	SubscriptionActiveStart string     `json:"subscription_active_start,omitempty"`
+	SubscriptionActiveUntil string     `json:"subscription_active_until,omitempty"`
+	Usage                   UsageStats `json:"usage"`
+	Quota                   *QuotaInfo `json:"quota,omitempty"`
 }
 
 /**
@@ -537,6 +543,12 @@ func (a *Account) UpdateToken(td TokenData) {
 	if td.IDToken == "" {
 		td.IDToken = prev.IDToken
 	}
+	if strings.TrimSpace(td.SubscriptionActiveStart) == "" {
+		td.SubscriptionActiveStart = prev.SubscriptionActiveStart
+	}
+	if strings.TrimSpace(td.SubscriptionActiveUntil) == "" {
+		td.SubscriptionActiveUntil = prev.SubscriptionActiveUntil
+	}
 	var expMs int64
 	if td.Expire != "" {
 		if t, err := time.Parse(time.RFC3339, td.Expire); err == nil {
@@ -824,24 +836,26 @@ func (a *Account) GetStats() AccountStats {
 	}
 
 	return AccountStats{
-		AccountID:           a.Token.AccountID,
-		Email:               a.Token.Email,
-		Status:              availability.Status,
-		StoredStatus:        availability.StoredStatus,
-		Pickable:            availability.Pickable,
-		UnavailableReason:   availability.UnavailableReason,
-		CooldownRemainingMs: availability.CooldownRemainingMs,
-		PlanType:            effectivePlanType(a.Token.PlanType, a.QuotaInfo),
-		DisableReason:       a.DisableReason,
-		TotalRequests:       a.TotalRequests.Load(),
-		TotalErrors:         a.TotalErrors.Load(),
-		ConsecutiveFailures: a.ConsecutiveFailures,
-		LastUsedAt:          a.LastUsedAt,
-		LastRefreshedAt:     a.LastRefreshedAt,
-		CooldownUntil:       a.CooldownUntil,
-		QuotaExhausted:      quotaExhausted,
-		QuotaResetsAt:       quotaResetsAt,
-		TokenExpire:         a.Token.Expire,
+		AccountID:               a.Token.AccountID,
+		Email:                   a.Token.Email,
+		Status:                  availability.Status,
+		StoredStatus:            availability.StoredStatus,
+		Pickable:                availability.Pickable,
+		UnavailableReason:       availability.UnavailableReason,
+		CooldownRemainingMs:     availability.CooldownRemainingMs,
+		PlanType:                effectivePlanType(a.Token.PlanType, a.QuotaInfo),
+		DisableReason:           a.DisableReason,
+		TotalRequests:           a.TotalRequests.Load(),
+		TotalErrors:             a.TotalErrors.Load(),
+		ConsecutiveFailures:     a.ConsecutiveFailures,
+		LastUsedAt:              a.LastUsedAt,
+		LastRefreshedAt:         a.LastRefreshedAt,
+		CooldownUntil:           a.CooldownUntil,
+		QuotaExhausted:          quotaExhausted,
+		QuotaResetsAt:           quotaResetsAt,
+		TokenExpire:             a.Token.Expire,
+		SubscriptionActiveStart: a.Token.SubscriptionActiveStart,
+		SubscriptionActiveUntil: a.Token.SubscriptionActiveUntil,
 		Usage: UsageStats{
 			TotalCompletions:     a.TotalCompletions.Load(),
 			InputTokens:          a.TotalInputTokens.Load(),

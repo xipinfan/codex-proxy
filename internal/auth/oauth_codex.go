@@ -207,15 +207,17 @@ func (f *CodexOAuthFlow) exchangeAuthorizationCode(ctx context.Context, code str
 		return nil, fmt.Errorf("解析授权换 token 响应失败: %w", err)
 	}
 
-	accountID, email, planType := parseIDTokenClaims(tokenResp.IDToken)
+	accountID, email, planType, activeStart, activeUntil := parseIDTokenClaims(tokenResp.IDToken)
 	return &TokenData{
-		IDToken:      tokenResp.IDToken,
-		AccessToken:  tokenResp.AccessToken,
-		RefreshToken: tokenResp.RefreshToken,
-		AccountID:    accountID,
-		Email:        email,
-		Expire:       time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second).Format(time.RFC3339),
-		PlanType:     planType,
+		IDToken:                 tokenResp.IDToken,
+		AccessToken:             tokenResp.AccessToken,
+		RefreshToken:            tokenResp.RefreshToken,
+		AccountID:               accountID,
+		Email:                   email,
+		Expire:                  time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second).Format(time.RFC3339),
+		PlanType:                planType,
+		SubscriptionActiveStart: activeStart,
+		SubscriptionActiveUntil: activeUntil,
 	}, nil
 }
 

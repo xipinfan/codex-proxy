@@ -15,6 +15,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -175,16 +176,18 @@ func (r *Refresher) RefreshToken(ctx context.Context, refreshToken string) (*Tok
 	}
 
 	/* 从 ID Token 中提取账号信息 */
-	accountID, email, planType := parseIDTokenClaims(tokenResp.IDToken)
+	accountID, email, planType, activeStart, activeUntil := parseIDTokenClaims(tokenResp.IDToken)
 
 	return &TokenData{
-		IDToken:      tokenResp.IDToken,
-		AccessToken:  tokenResp.AccessToken,
-		RefreshToken: tokenResp.RefreshToken,
-		AccountID:    accountID,
-		Email:        email,
-		Expire:       time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second).Format(time.RFC3339),
-		PlanType:     planType,
+		IDToken:                 tokenResp.IDToken,
+		AccessToken:             tokenResp.AccessToken,
+		RefreshToken:            tokenResp.RefreshToken,
+		AccountID:               accountID,
+		Email:                   email,
+		Expire:                  time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second).Format(time.RFC3339),
+		PlanType:                planType,
+		SubscriptionActiveStart: activeStart,
+		SubscriptionActiveUntil: activeUntil,
 	}, nil
 }
 
@@ -243,7 +246,6 @@ func isNonRetryableErr(err error) bool {
 	return strings.Contains(raw, "already been used")
 }
 
-
 func IsPermanentOAuthRefreshFailure(err error) bool {
 	if err == nil {
 		return false
@@ -274,32 +276,36 @@ func IsPermanentOAuthRefreshFailure(err error) bool {
  * @returns string - AccountID
  * @returns string - Email
  * @returns string - PlanType (free/plus/pro)
+ * @returns string - ChatGPT subscription active start
+ * @returns string - ChatGPT subscription active until
  */
-func parseIDTokenClaims(idToken string) (string, string, string) {
+func parseIDTokenClaims(idToken string) (string, string, string, string, string) {
 	if idToken == "" {
-		return "", "", ""
+		return "", "", "", "", ""
 	}
 
 	parts := strings.Split(idToken, ".")
 	if len(parts) < 2 {
-		return "", "", ""
+		return "", "", "", "", ""
 	}
 
 	/* 使用 base64 RawURLEncoding 解码 JWT payload */
 	decoded, err := base64.RawURLEncoding.DecodeString(parts[1])
 	if err != nil {
-		return "", "", ""
+		return "", "", "", "", ""
 	}
 
 	var claims struct {
 		Sub   string `json:"sub"`
 		Email string `json:"email"`
 		Auth  struct {
-			ChatGPTAccountID string `json:"chatgpt_account_id"`
-			ChatGPTUserID    string `json:"chatgpt_user_id"`
-			ChatGPTPlanType  string `json:"chatgpt_plan_type"`
-			OrganizationID   string `json:"organization_id"`
-			Organizations    []struct {
+			ChatGPTAccountID               string `json:"chatgpt_account_id"`
+			ChatGPTUserID                  string `json:"chatgpt_user_id"`
+			ChatGPTPlanType                string `json:"chatgpt_plan_type"`
+			ChatGPTSubscriptionActiveStart any    `json:"chatgpt_subscription_active_start"`
+			ChatGPTSubscriptionActiveUntil any    `json:"chatgpt_subscription_active_until"`
+			OrganizationID                 string `json:"organization_id"`
+			Organizations                  []struct {
 				ID string `json:"id"`
 			} `json:"organizations"`
 		} `json:"https://api.openai.com/auth"`
@@ -315,5 +321,39 @@ func parseIDTokenClaims(idToken string) (string, string, string) {
 		accountID = claims.Auth.Organizations[0].ID
 	}
 
-	return accountID, claims.Email, claims.Auth.ChatGPTPlanType
+	return accountID,
+		claims.Email,
+		claims.Auth.ChatGPTPlanType,
+		normalizeSubscriptionClaim(claims.Auth.ChatGPTSubscriptionActiveStart),
+		normalizeSubscriptionClaim(claims.Auth.ChatGPTSubscriptionActiveUntil)
+}
+
+func normalizeSubscriptionClaim(input any) string {
+	switch v := input.(type) {
+	case string:
+		value := strings.TrimSpace(v)
+		if value == "" {
+			return ""
+		}
+		if n, err := strconv.ParseFloat(value, 64); err == nil {
+			return unixSecondsToRFC3339(n)
+		}
+		return value
+	case float64:
+		return unixSecondsToRFC3339(v)
+	case int64:
+		return unixSecondsToRFC3339(float64(v))
+	case int:
+		return unixSecondsToRFC3339(float64(v))
+	default:
+		return ""
+	}
+}
+
+func unixSecondsToRFC3339(value float64) string {
+	if value <= 0 {
+		return ""
+	}
+	seconds := int64(value)
+	return time.Unix(seconds, 0).UTC().Format(time.RFC3339)
 }

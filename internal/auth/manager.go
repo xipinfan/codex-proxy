@@ -273,8 +273,8 @@ func (m *Manager) prepareDBStatements() error {
 	switch m.dbDialect {
 	case codexdb.DialectMySQL:
 		s := `
-INSERT INTO codex_accounts (account_id,email,id_token,access_token,refresh_token,expire,plan_type,last_refresh,status,cooldown_until,disable_reason,last_used_at,updated_at)
-VALUES (?,?,?,?,?,?,?,?,?,?,?,?,UTC_TIMESTAMP(6))
+INSERT INTO codex_accounts (account_id,email,id_token,access_token,refresh_token,expire,plan_type,subscription_active_start,subscription_active_until,last_refresh,status,cooldown_until,disable_reason,last_used_at,updated_at)
+VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,UTC_TIMESTAMP(6))
 ON DUPLICATE KEY UPDATE
 	email = VALUES(email),
 	account_id = VALUES(account_id),
@@ -283,6 +283,8 @@ ON DUPLICATE KEY UPDATE
 	refresh_token = VALUES(refresh_token),
 	expire = VALUES(expire),
 	plan_type = VALUES(plan_type),
+	subscription_active_start = VALUES(subscription_active_start),
+	subscription_active_until = VALUES(subscription_active_until),
 	last_refresh = VALUES(last_refresh),
 	status = VALUES(status),
 	cooldown_until = VALUES(cooldown_until),
@@ -298,8 +300,8 @@ ON DUPLICATE KEY UPDATE
 		return nil
 	case codexdb.DialectSQLite:
 		s1 := `
-INSERT INTO codex_accounts (account_id,email,id_token,access_token,refresh_token,expire,plan_type,last_refresh,status,cooldown_until,disable_reason,last_used_at,updated_at)
-VALUES (?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)
+INSERT INTO codex_accounts (account_id,email,id_token,access_token,refresh_token,expire,plan_type,subscription_active_start,subscription_active_until,last_refresh,status,cooldown_until,disable_reason,last_used_at,updated_at)
+VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)
 ON CONFLICT(account_id) DO UPDATE SET
 	email = excluded.email,
 	id_token = excluded.id_token,
@@ -307,6 +309,8 @@ ON CONFLICT(account_id) DO UPDATE SET
 	refresh_token = excluded.refresh_token,
 	expire = excluded.expire,
 	plan_type = excluded.plan_type,
+	subscription_active_start = excluded.subscription_active_start,
+	subscription_active_until = excluded.subscription_active_until,
 	last_refresh = excluded.last_refresh,
 	status = excluded.status,
 	cooldown_until = excluded.cooldown_until,
@@ -319,8 +323,8 @@ ON CONFLICT(account_id) DO UPDATE SET
 		}
 		m.saveTokenStmt = stmt
 		s2 := `
-INSERT INTO codex_accounts (account_id,email,id_token,access_token,refresh_token,expire,plan_type,last_refresh,status,cooldown_until,disable_reason,last_used_at,updated_at)
-VALUES (?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)
+INSERT INTO codex_accounts (account_id,email,id_token,access_token,refresh_token,expire,plan_type,subscription_active_start,subscription_active_until,last_refresh,status,cooldown_until,disable_reason,last_used_at,updated_at)
+VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)
 ON CONFLICT(email) DO UPDATE SET
 	account_id = excluded.account_id,
 	id_token = excluded.id_token,
@@ -328,6 +332,8 @@ ON CONFLICT(email) DO UPDATE SET
 	refresh_token = excluded.refresh_token,
 	expire = excluded.expire,
 	plan_type = excluded.plan_type,
+	subscription_active_start = excluded.subscription_active_start,
+	subscription_active_until = excluded.subscription_active_until,
 	last_refresh = excluded.last_refresh,
 	status = excluded.status,
 	cooldown_until = excluded.cooldown_until,
@@ -342,8 +348,8 @@ ON CONFLICT(email) DO UPDATE SET
 		return nil
 	default:
 		s1 := `
-INSERT INTO codex_accounts (account_id,email,id_token,access_token,refresh_token,expire,plan_type,last_refresh,status,cooldown_until,disable_reason,last_used_at,updated_at)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,NOW())
+INSERT INTO codex_accounts (account_id,email,id_token,access_token,refresh_token,expire,plan_type,subscription_active_start,subscription_active_until,last_refresh,status,cooldown_until,disable_reason,last_used_at,updated_at)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,NOW())
 ON CONFLICT (account_id) DO UPDATE SET
 	email = EXCLUDED.email,
 	id_token = EXCLUDED.id_token,
@@ -351,6 +357,8 @@ ON CONFLICT (account_id) DO UPDATE SET
 	refresh_token = EXCLUDED.refresh_token,
 	expire = EXCLUDED.expire,
 	plan_type = EXCLUDED.plan_type,
+	subscription_active_start = EXCLUDED.subscription_active_start,
+	subscription_active_until = EXCLUDED.subscription_active_until,
 	last_refresh = EXCLUDED.last_refresh,
 	status = EXCLUDED.status,
 	cooldown_until = EXCLUDED.cooldown_until,
@@ -363,8 +371,8 @@ ON CONFLICT (account_id) DO UPDATE SET
 		}
 		m.saveTokenStmt = stmt
 		s2 := `
-INSERT INTO codex_accounts (account_id,email,id_token,access_token,refresh_token,expire,plan_type,last_refresh,status,cooldown_until,disable_reason,last_used_at,updated_at)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,NOW())
+INSERT INTO codex_accounts (account_id,email,id_token,access_token,refresh_token,expire,plan_type,subscription_active_start,subscription_active_until,last_refresh,status,cooldown_until,disable_reason,last_used_at,updated_at)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,NOW())
 ON CONFLICT (email) DO UPDATE SET
 	account_id = EXCLUDED.account_id,
 	id_token = EXCLUDED.id_token,
@@ -372,6 +380,8 @@ ON CONFLICT (email) DO UPDATE SET
 	refresh_token = EXCLUDED.refresh_token,
 	expire = EXCLUDED.expire,
 	plan_type = EXCLUDED.plan_type,
+	subscription_active_start = EXCLUDED.subscription_active_start,
+	subscription_active_until = EXCLUDED.subscription_active_until,
 	last_refresh = EXCLUDED.last_refresh,
 	status = EXCLUDED.status,
 	cooldown_until = EXCLUDED.cooldown_until,
@@ -654,8 +664,10 @@ func accountFromTokenFile(tf *TokenFile, logicalPath string) (*Account, error) {
 	accountID := tf.AccountID
 	email := tf.Email
 	var planType string
+	activeStart := strings.TrimSpace(tf.SubscriptionActiveStart)
+	activeUntil := strings.TrimSpace(tf.SubscriptionActiveUntil)
 	if tf.IDToken != "" {
-		jwtAccountID, jwtEmail, jwtPlan := parseIDTokenClaims(tf.IDToken)
+		jwtAccountID, jwtEmail, jwtPlan, jwtActiveStart, jwtActiveUntil := parseIDTokenClaims(tf.IDToken)
 		if accountID == "" {
 			accountID = jwtAccountID
 		}
@@ -663,6 +675,12 @@ func accountFromTokenFile(tf *TokenFile, logicalPath string) (*Account, error) {
 			email = jwtEmail
 		}
 		planType = jwtPlan
+		if activeStart == "" {
+			activeStart = jwtActiveStart
+		}
+		if activeUntil == "" {
+			activeUntil = jwtActiveUntil
+		}
 	}
 	if strings.TrimSpace(tf.PlanType) != "" {
 		planType = strings.ToLower(strings.TrimSpace(tf.PlanType))
@@ -670,13 +688,15 @@ func accountFromTokenFile(tf *TokenFile, logicalPath string) (*Account, error) {
 	acc := &Account{
 		FilePath: logicalPath,
 		Token: TokenData{
-			IDToken:      tf.IDToken,
-			AccessToken:  tf.AccessToken,
-			RefreshToken: rt,
-			AccountID:    accountID,
-			Email:        email,
-			Expire:       tf.Expire,
-			PlanType:     planType,
+			IDToken:                 tf.IDToken,
+			AccessToken:             tf.AccessToken,
+			RefreshToken:            rt,
+			AccountID:               accountID,
+			Email:                   email,
+			Expire:                  tf.Expire,
+			PlanType:                planType,
+			SubscriptionActiveStart: activeStart,
+			SubscriptionActiveUntil: activeUntil,
 		},
 		Status: StatusActive,
 	}
@@ -702,7 +722,7 @@ func loadAccountFromFile(filePath string) (*Account, error) {
 	return accountFromTokenFile(&tf, filePath)
 }
 
-func accountFromDBRow(id int64, accountID, email, idToken, accessToken, refreshToken, expire, planType sql.NullString, lastRefresh sql.NullTime, status sql.NullInt32, cooldownUntil sql.NullTime, disableReason sql.NullString, lastUsedAt sql.NullTime) (*Account, bool) {
+func accountFromDBRow(id int64, accountID, email, idToken, accessToken, refreshToken, expire, planType, subscriptionActiveStart, subscriptionActiveUntil sql.NullString, lastRefresh sql.NullTime, status sql.NullInt32, cooldownUntil sql.NullTime, disableReason sql.NullString, lastUsedAt sql.NullTime) (*Account, bool) {
 	if strings.TrimSpace(refreshToken.String) == "" && strings.TrimSpace(accessToken.String) == "" && strings.TrimSpace(idToken.String) == "" {
 		return nil, false
 	}
@@ -716,13 +736,15 @@ func accountFromDBRow(id int64, accountID, email, idToken, accessToken, refreshT
 	acc := &Account{
 		FilePath: key,
 		Token: TokenData{
-			IDToken:      idToken.String,
-			AccessToken:  accessToken.String,
-			RefreshToken: refreshToken.String,
-			AccountID:    accountID.String,
-			Email:        email.String,
-			Expire:       expire.String,
-			PlanType:     planType.String,
+			IDToken:                 idToken.String,
+			AccessToken:             accessToken.String,
+			RefreshToken:            refreshToken.String,
+			AccountID:               accountID.String,
+			Email:                   email.String,
+			Expire:                  expire.String,
+			PlanType:                planType.String,
+			SubscriptionActiveStart: subscriptionActiveStart.String,
+			SubscriptionActiveUntil: subscriptionActiveUntil.String,
 		},
 		Status:          StatusActive,
 		LastRefreshedAt: lastRefresh.Time,
@@ -755,7 +777,7 @@ func (m *Manager) loadAccountsFromDBSlice(ctx context.Context, offset, limit int
 	if m.db == nil {
 		return nil, 0, nil
 	}
-	base := `SELECT id, account_id,email,id_token,access_token,refresh_token,expire,plan_type,last_refresh,status,cooldown_until,disable_reason,last_used_at FROM codex_accounts ORDER BY id`
+	base := `SELECT id, account_id,email,id_token,access_token,refresh_token,expire,plan_type,subscription_active_start,subscription_active_until,last_refresh,status,cooldown_until,disable_reason,last_used_at FROM codex_accounts ORDER BY id`
 	var rows *sql.Rows
 	var err error
 	switch m.dbDialect {
@@ -773,14 +795,14 @@ func (m *Manager) loadAccountsFromDBSlice(ctx context.Context, offset, limit int
 	for rows.Next() {
 		rowCount++
 		var id int64
-		var accountID, email, idToken, accessToken, refreshToken, expire, planType, disableReason sql.NullString
+		var accountID, email, idToken, accessToken, refreshToken, expire, planType, subscriptionActiveStart, subscriptionActiveUntil, disableReason sql.NullString
 		var lastRefresh, cooldownUntil, lastUsedAt sql.NullTime
 		var status sql.NullInt32
-		if err := rows.Scan(&id, &accountID, &email, &idToken, &accessToken, &refreshToken, &expire, &planType, &lastRefresh, &status, &cooldownUntil, &disableReason, &lastUsedAt); err != nil {
+		if err := rows.Scan(&id, &accountID, &email, &idToken, &accessToken, &refreshToken, &expire, &planType, &subscriptionActiveStart, &subscriptionActiveUntil, &lastRefresh, &status, &cooldownUntil, &disableReason, &lastUsedAt); err != nil {
 			log.Warnf("读取数据库账号失败: %v", err)
 			continue
 		}
-		if acc, ok := accountFromDBRow(id, accountID, email, idToken, accessToken, refreshToken, expire, planType, lastRefresh, status, cooldownUntil, disableReason, lastUsedAt); ok {
+		if acc, ok := accountFromDBRow(id, accountID, email, idToken, accessToken, refreshToken, expire, planType, subscriptionActiveStart, subscriptionActiveUntil, lastRefresh, status, cooldownUntil, disableReason, lastUsedAt); ok {
 			out = append(out, acc)
 		}
 	}
@@ -791,7 +813,7 @@ func (m *Manager) loadAccountsFromDB() error {
 	if m.db == nil {
 		return nil
 	}
-	rows, err := m.db.Query(`SELECT id, account_id,email,id_token,access_token,refresh_token,expire,plan_type,last_refresh,status,cooldown_until,disable_reason,last_used_at FROM codex_accounts ORDER BY id`)
+	rows, err := m.db.Query(`SELECT id, account_id,email,id_token,access_token,refresh_token,expire,plan_type,subscription_active_start,subscription_active_until,last_refresh,status,cooldown_until,disable_reason,last_used_at FROM codex_accounts ORDER BY id`)
 	if err != nil {
 		return err
 	}
@@ -802,14 +824,14 @@ func (m *Manager) loadAccountsFromDB() error {
 
 	for rows.Next() {
 		var id int64
-		var accountID, email, idToken, accessToken, refreshToken, expire, planType, disableReason sql.NullString
+		var accountID, email, idToken, accessToken, refreshToken, expire, planType, subscriptionActiveStart, subscriptionActiveUntil, disableReason sql.NullString
 		var lastRefresh, cooldownUntil, lastUsedAt sql.NullTime
 		var status sql.NullInt32
-		if err := rows.Scan(&id, &accountID, &email, &idToken, &accessToken, &refreshToken, &expire, &planType, &lastRefresh, &status, &cooldownUntil, &disableReason, &lastUsedAt); err != nil {
+		if err := rows.Scan(&id, &accountID, &email, &idToken, &accessToken, &refreshToken, &expire, &planType, &subscriptionActiveStart, &subscriptionActiveUntil, &lastRefresh, &status, &cooldownUntil, &disableReason, &lastUsedAt); err != nil {
 			log.Warnf("读取数据库账号失败: %v", err)
 			continue
 		}
-		acc, ok := accountFromDBRow(id, accountID, email, idToken, accessToken, refreshToken, expire, planType, lastRefresh, status, cooldownUntil, disableReason, lastUsedAt)
+		acc, ok := accountFromDBRow(id, accountID, email, idToken, accessToken, refreshToken, expire, planType, subscriptionActiveStart, subscriptionActiveUntil, lastRefresh, status, cooldownUntil, disableReason, lastUsedAt)
 		if !ok {
 			continue
 		}
@@ -902,6 +924,8 @@ func (m *Manager) saveTokenToDB(acc *Account) error {
 		acc.Token.RefreshToken,
 		acc.Token.Expire,
 		acc.Token.PlanType,
+		acc.Token.SubscriptionActiveStart,
+		acc.Token.SubscriptionActiveUntil,
 		acc.LastRefreshedAt,
 		status,
 		cooldownUntil,
@@ -933,8 +957,8 @@ func (m *Manager) saveTokenToDB(acc *Account) error {
 	switch m.dbDialect {
 	case codexdb.DialectMySQL:
 		_, err := m.db.Exec(`
-INSERT INTO codex_accounts (account_id,email,id_token,access_token,refresh_token,expire,plan_type,last_refresh,status,cooldown_until,disable_reason,last_used_at,updated_at)
-VALUES (?,?,?,?,?,?,?,?,?,?,?,?,UTC_TIMESTAMP(6))
+INSERT INTO codex_accounts (account_id,email,id_token,access_token,refresh_token,expire,plan_type,subscription_active_start,subscription_active_until,last_refresh,status,cooldown_until,disable_reason,last_used_at,updated_at)
+VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,UTC_TIMESTAMP(6))
 ON DUPLICATE KEY UPDATE
 	email = VALUES(email),
 	account_id = VALUES(account_id),
@@ -943,6 +967,8 @@ ON DUPLICATE KEY UPDATE
 	refresh_token = VALUES(refresh_token),
 	expire = VALUES(expire),
 	plan_type = VALUES(plan_type),
+	subscription_active_start = VALUES(subscription_active_start),
+	subscription_active_until = VALUES(subscription_active_until),
 	last_refresh = VALUES(last_refresh),
 	status = VALUES(status),
 	cooldown_until = VALUES(cooldown_until),
@@ -952,8 +978,8 @@ ON DUPLICATE KEY UPDATE
 		return err
 	case codexdb.DialectSQLite:
 		_, err := m.db.Exec(`
-INSERT INTO codex_accounts (account_id,email,id_token,access_token,refresh_token,expire,plan_type,last_refresh,status,cooldown_until,disable_reason,last_used_at,updated_at)
-VALUES (?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)
+INSERT INTO codex_accounts (account_id,email,id_token,access_token,refresh_token,expire,plan_type,subscription_active_start,subscription_active_until,last_refresh,status,cooldown_until,disable_reason,last_used_at,updated_at)
+VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)
 ON CONFLICT(account_id) DO UPDATE SET
 	email = excluded.email,
 	id_token = excluded.id_token,
@@ -961,6 +987,8 @@ ON CONFLICT(account_id) DO UPDATE SET
 	refresh_token = excluded.refresh_token,
 	expire = excluded.expire,
 	plan_type = excluded.plan_type,
+	subscription_active_start = excluded.subscription_active_start,
+	subscription_active_until = excluded.subscription_active_until,
 	last_refresh = excluded.last_refresh,
 	status = excluded.status,
 	cooldown_until = excluded.cooldown_until,
@@ -970,8 +998,8 @@ ON CONFLICT(account_id) DO UPDATE SET
 		return err
 	default:
 		_, err := m.db.Exec(`
-INSERT INTO codex_accounts (account_id,email,id_token,access_token,refresh_token,expire,plan_type,last_refresh,status,cooldown_until,disable_reason,last_used_at,updated_at)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,NOW())
+INSERT INTO codex_accounts (account_id,email,id_token,access_token,refresh_token,expire,plan_type,subscription_active_start,subscription_active_until,last_refresh,status,cooldown_until,disable_reason,last_used_at,updated_at)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,NOW())
 ON CONFLICT (account_id) DO UPDATE SET
 	email = EXCLUDED.email,
 	id_token = EXCLUDED.id_token,
@@ -979,6 +1007,8 @@ ON CONFLICT (account_id) DO UPDATE SET
 	refresh_token = EXCLUDED.refresh_token,
 	expire = EXCLUDED.expire,
 	plan_type = EXCLUDED.plan_type,
+	subscription_active_start = EXCLUDED.subscription_active_start,
+	subscription_active_until = EXCLUDED.subscription_active_until,
 	last_refresh = EXCLUDED.last_refresh,
 	status = EXCLUDED.status,
 	cooldown_until = EXCLUDED.cooldown_until,
@@ -2776,15 +2806,17 @@ func (m *Manager) saveTokenToFile(acc *Account) error {
 	}
 	acc.mu.RLock()
 	tf := TokenFile{
-		IDToken:      acc.Token.IDToken,
-		AccessToken:  acc.Token.AccessToken,
-		RefreshToken: acc.Token.RefreshToken,
-		AccountID:    acc.Token.AccountID,
-		LastRefresh:  acc.LastRefreshedAt.Format(time.RFC3339),
-		Email:        acc.Token.Email,
-		Type:         "codex",
-		Expire:       acc.Token.Expire,
-		PlanType:     acc.Token.PlanType,
+		IDToken:                 acc.Token.IDToken,
+		AccessToken:             acc.Token.AccessToken,
+		RefreshToken:            acc.Token.RefreshToken,
+		AccountID:               acc.Token.AccountID,
+		LastRefresh:             acc.LastRefreshedAt.Format(time.RFC3339),
+		Email:                   acc.Token.Email,
+		Type:                    "codex",
+		Expire:                  acc.Token.Expire,
+		PlanType:                acc.Token.PlanType,
+		SubscriptionActiveStart: acc.Token.SubscriptionActiveStart,
+		SubscriptionActiveUntil: acc.Token.SubscriptionActiveUntil,
 	}
 	filePath := acc.FilePath
 	acc.mu.RUnlock()

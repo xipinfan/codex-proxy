@@ -133,6 +133,8 @@ function toAccountView(input: AccountStatsResponse): AccountView {
     quotaExhausted: Boolean(input?.quota_exhausted),
     quotaResetsAt: toDateString(input?.quota_resets_at),
     tokenExpire: String(input?.token_expire ?? ''),
+    subscriptionActiveStart: toDateString(input?.subscription_active_start),
+    subscriptionActiveUntil: toDateString(input?.subscription_active_until),
     usage: toUsageView(input?.usage),
     quota: toQuotaView(input?.quota),
   };

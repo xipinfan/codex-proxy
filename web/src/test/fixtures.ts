@@ -37,6 +37,8 @@ export const sampleAccount: AccountView = {
   quotaExhausted: false,
   quotaResetsAt: '2026-04-22T00:00:00Z',
   tokenExpire: '2026-04-30T00:00:00Z',
+  subscriptionActiveStart: '2026-05-01T00:00:00Z',
+  subscriptionActiveUntil: '2026-06-01T00:00:00Z',
   usage: {
     totalCompletions: 19,
     inputTokens: 3200,

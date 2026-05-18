@@ -110,6 +110,14 @@ export function AccountDetailDrawer({ account, open, onClose, onDeleteAccount }:
                 <span className="font-medium text-[color:var(--text-primary)]">{formatDateTime(account.lastRefreshedAt)}</span>
               </div>
               <div className="flex items-center justify-between">
+                <span>会员开始时间</span>
+                <span className="font-medium text-[color:var(--text-primary)]">{formatDateTime(account.subscriptionActiveStart)}</span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span>会员到期时间</span>
+                <span className="font-medium text-[color:var(--text-primary)]">{formatDateTime(account.subscriptionActiveUntil)}</span>
+              </div>
+              <div className="flex items-center justify-between">
                 <span>最近使用</span>
                 <span className="font-medium text-[color:var(--text-primary)]">{formatDateTime(account.lastUsedAt)}</span>
               </div>

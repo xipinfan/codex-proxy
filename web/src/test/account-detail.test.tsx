@@ -26,6 +26,25 @@ describe('AccountDetailDrawer', () => {
     expect(screen.getByText(/暂无额度数据/i)).toBeInTheDocument();
   });
 
+  it('renders subscription window in account details', () => {
+    render(
+      <AccountDetailDrawer
+        account={{
+          ...sampleAccount,
+          subscriptionActiveStart: '2026-05-01T00:00:00Z',
+          subscriptionActiveUntil: '2026-06-01T00:00:00Z',
+        }}
+        open
+        onClose={() => {}}
+      />,
+    );
+
+    expect(screen.getByText('会员开始时间')).toBeInTheDocument();
+    expect(screen.getByText('会员到期时间')).toBeInTheDocument();
+    expect(screen.getByText(/05\/01/)).toBeInTheDocument();
+    expect(screen.getByText(/06\/01/)).toBeInTheDocument();
+  });
+
   it('supports deleting an account from danger actions', async () => {
     const user = userEvent.setup();
     const onDeleteAccount = vi.fn().mockResolvedValue(undefined);
