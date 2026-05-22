@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	log "github.com/sirupsen/logrus"
 )
 
 /* 可用账号缓存有效期（毫秒），超过此时间自动刷新（略短以减少选到已冷却/刚 401 的号） */
@@ -379,6 +381,9 @@ func filterAvailable(model string, accounts []*Account) []*Account {
 		}
 		if len(primary) > 0 {
 			return primary
+		}
+		if len(secondary) > 0 {
+			log.Debugf("free fallback activated: model=%s free_available=%d", model, len(secondary))
 		}
 		return secondary
 	}

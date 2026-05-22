@@ -1,11 +1,14 @@
 package auth
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
+
+	log "github.com/sirupsen/logrus"
 )
 
 func TestGetStatsReportsExpiredCooldownAsPickable(t *testing.T) {
@@ -208,6 +211,35 @@ func TestFallbackFilterRevealsFreeWhenPaidUnavailable(t *testing.T) {
 	got := filterAvailable("gpt-5", []*Account{disabled, free, cooling})
 	if len(got) != 1 || got[0] != free {
 		t.Fatalf("filterAvailable() = %#v, want fallback free account", got)
+	}
+}
+
+func TestFallbackFilterLogsFreeActivationAtDebug(t *testing.T) {
+	resetFreeAccountPolicy(t)
+
+	originalOut := log.StandardLogger().Out
+	originalLevel := log.GetLevel()
+	originalFormatter := log.StandardLogger().Formatter
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	log.SetLevel(log.DebugLevel)
+	log.SetFormatter(&log.TextFormatter{DisableTimestamp: true, DisableColors: true})
+	t.Cleanup(func() {
+		log.SetOutput(originalOut)
+		log.SetLevel(originalLevel)
+		log.SetFormatter(originalFormatter)
+	})
+
+	disabled := selectorTestAccount("disabled.json", "team", 20)
+	disabled.SetDisabled(nil)
+	free := selectorTestAccount("free.json", "free", 20)
+
+	got := filterAvailable("gpt-5", []*Account{disabled, free})
+	if len(got) != 1 || got[0] != free {
+		t.Fatalf("filterAvailable() = %#v, want fallback free account", got)
+	}
+	if !bytes.Contains(buf.Bytes(), []byte("free fallback activated")) {
+		t.Fatalf("debug log = %q, want free fallback activation", buf.String())
 	}
 }
 

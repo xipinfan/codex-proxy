@@ -136,6 +136,8 @@ func main() {
 	}
 	log.Infof("刷新间隔: %d 秒", cfg.RefreshInterval)
 	log.Infof("最大重试: %d 次", cfg.MaxRetry)
+	log.Infof("free 账号策略: role=%s cutoff=%d", cfg.FreeAccountRole, cfg.FreeAccountCutoff)
+	log.Infof("上游缓存指标日志: %v", cfg.LogCacheMetrics)
 	if cfg.UpstreamPoolAutoScale {
 		log.Infof("出站连接池(自适应): max-conns-per-host=%d max-idle-per-host=%d max-idle=%d tcp_nodelay=on",
 			cfg.MaxConnsPerHost, cfg.MaxIdleConnsPerHost, cfg.MaxIdleConns)
