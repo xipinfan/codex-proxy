@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -22,6 +23,7 @@ type ResponseUsage struct {
 	InputTokens    int64
 	OutputTokens   int64
 	TotalTokens    int64
+	CachedTokens   int64
 	FoundCompleted bool
 	FoundUsage     bool
 }
@@ -42,6 +44,7 @@ func ExtractResponseUsageFromCompletedJSON(rawJSON []byte) ResponseUsage {
 	out.InputTokens = usage.Get("input_tokens").Int()
 	out.OutputTokens = usage.Get("output_tokens").Int()
 	out.TotalTokens = usage.Get("total_tokens").Int()
+	out.CachedTokens = usage.Get("input_tokens_details.cached_tokens").Int()
 	if out.TotalTokens <= 0 && (out.InputTokens > 0 || out.OutputTokens > 0) {
 		out.TotalTokens = out.InputTokens + out.OutputTokens
 	}
@@ -71,6 +74,7 @@ func ExtractResponseUsageFromResponseObjectJSON(rawJSON []byte) ResponseUsage {
 		InputTokens:    usage.Get("input_tokens").Int(),
 		OutputTokens:   usage.Get("output_tokens").Int(),
 		TotalTokens:    usage.Get("total_tokens").Int(),
+		CachedTokens:   usage.Get("input_tokens_details.cached_tokens").Int(),
 	}
 	if out.TotalTokens <= 0 && (out.InputTokens > 0 || out.OutputTokens > 0) {
 		out.TotalTokens = out.InputTokens + out.OutputTokens
@@ -217,6 +221,9 @@ type StreamState struct {
 	UsageInput               int64
 	UsageOutput              int64
 	UsageTotal               int64
+	AccountID                string
+	Tier                     string
+	LogMetric                bool
 	reasoningDeltaByItem     map[string]string
 	hasReasoningSummaryDelta bool
 
@@ -445,6 +452,21 @@ func ConvertStreamChunk(_ context.Context, rawLine []byte, state *StreamState, r
 			state.UsageInput = usage.Get("input_tokens").Int()
 			state.UsageOutput = usage.Get("output_tokens").Int()
 			state.UsageTotal = usage.Get("total_tokens").Int()
+			if state.LogMetric {
+				cachedTokens := usage.Get("input_tokens_details.cached_tokens").Int()
+				hitRatio := float64(0)
+				if state.UsageInput > 0 {
+					hitRatio = float64(cachedTokens) / float64(state.UsageInput)
+				}
+				log.WithFields(log.Fields{
+					"account_id":    state.AccountID,
+					"tier":          state.Tier,
+					"model":         state.Model,
+					"input_tokens":  state.UsageInput,
+					"cached_tokens": cachedTokens,
+					"hit_ratio":     hitRatio,
+				}).Info("upstream_cache_metric")
+			}
 			if !usageFinalSeparateChunk {
 				if v := usage.Get("output_tokens"); v.Exists() {
 					tpl, _ = sjson.Set(tpl, "usage.completion_tokens", v.Int())

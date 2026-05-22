@@ -30,6 +30,8 @@ type CodexResponsesStream struct {
 	reverseTools map[string]string
 	/* IncludeUsage 为 true 时按 OpenAI stream_options.include_usage 在 [DONE] 前追加 choices 为 [] 的 usage 块 */
 	IncludeUsage bool
+	/* LogCacheMetrics 为 true 时由 translator 在 response.completed 上记录 upstream cache metric */
+	LogCacheMetrics bool
 	/* pumpRounds Pump 阶段最多执行的读循环轮数（含首轮）；换号重连次数 = pumpRounds-1，与 max-retry 对齐 */
 	pumpRounds int
 	/* reopenExcluded 已在 pump 阶段因上游读失败而排除的凭据路径，避免 reopen 再次选到同一账号 */
@@ -256,6 +258,7 @@ func (e *Executor) OpenCodexResponsesStream(ctx context.Context, rc RetryConfig,
 		SendDur:               meta.SendDur,
 		reverseTools:          meta.ReverseTools,
 		IncludeUsage:          includeUsage,
+		LogCacheMetrics:       e.logCacheMetrics,
 		pumpRounds:            codexStreamPumpRounds(rc.MaxRetry),
 		reopenExcluded:        make(map[string]bool),
 		debugUpstreamStream:   rc.DebugUpstreamStream,
@@ -334,7 +337,7 @@ func (s *CodexResponsesStream) PumpChatCompletion(w io.Writer, flush func()) err
 		}
 		skipLeadingReopen = false
 
-		state = translator.NewStreamState(s.BaseModel)
+		state = s.newStreamState()
 		reverseToolMap := s.reverseTools
 		scanner := bufio.NewScanner(s.body)
 		scanner.Buffer(make([]byte, scannerInitSize), scannerMaxSize)
@@ -532,6 +535,23 @@ func (s *CodexResponsesStream) PumpChatCompletion(w io.Writer, flush func()) err
 	return nil
 }
 
+func (s *CodexResponsesStream) newStreamState() *translator.StreamState {
+	state := translator.NewStreamState(s.BaseModel)
+	state.LogMetric = s.LogCacheMetrics
+	if s.account != nil {
+		state.AccountID = s.account.GetAccountID()
+		state.Tier = cacheMetricTier(s.account)
+	}
+	return state
+}
+
+func cacheMetricTier(account *auth.Account) string {
+	if account == nil {
+		return ""
+	}
+	return account.PlanTier()
+}
+
 // PumpRawSSE 原样转发上游 SSE 字节（Responses API，仅写 w 即响应体）。
 // 若尚未向 w 写入任何字节（已发的 HTTP 响应头不计入），遇读错误、io.EOF 且无字节等均换号重连，次数与 pumpRounds 对齐；除 context.Canceled 外不因「非 GOAWAY」拒绝换号。
 func (s *CodexResponsesStream) PumpRawSSE(w io.Writer, flush func()) error {
@@ -589,6 +609,9 @@ func (s *CodexResponsesStream) PumpRawSSE(w io.Writer, flush func()) error {
 						lineBuf = nil
 					}
 					if sseBodyBytes > 0 {
+						if s.LogCacheMetrics {
+							logUpstreamCacheMetric(s.account, s.BaseModel, usage)
+						}
 						usage = EstimateUsageWithFallback(usage, outputTextAcc.Text(), s.estimatedPromptTokens, s.BaseModel)
 						if usage.FoundUsage && (usage.InputTokens > 0 || usage.OutputTokens > 0) {
 							s.account.RecordUsage(usage.InputTokens, usage.OutputTokens, usage.TotalTokens)
@@ -716,6 +739,7 @@ type CodexCompactStream struct {
 	BaseModel             string
 	ConvertDur            time.Duration
 	SendDur               time.Duration
+	LogCacheMetrics       bool
 	estimatedPromptTokens int64
 	usage                 translator.ResponseUsage
 }
@@ -758,6 +782,9 @@ func (s *CodexCompactStream) PumpBody(w io.Writer, flush func()) error {
 					outputTextAcc.AddSSELine(lineBuf)
 					lineBuf = nil
 				}
+				if s.LogCacheMetrics {
+					logUpstreamCacheMetric(s.Account, s.BaseModel, s.usage)
+				}
 				s.usage = EstimateUsageWithFallback(s.usage, outputTextAcc.Text(), s.estimatedPromptTokens, s.BaseModel)
 				return nil
 			}
@@ -771,4 +798,30 @@ func (s *CodexCompactStream) Usage() translator.ResponseUsage {
 		return translator.ResponseUsage{}
 	}
 	return s.usage
+}
+
+func logUpstreamCacheMetric(account *auth.Account, model string, usage translator.ResponseUsage) {
+	if !usage.FoundUsage {
+		return
+	}
+	input := usage.InputTokens
+	cached := usage.CachedTokens
+	hitRatio := float64(0)
+	if input > 0 {
+		hitRatio = float64(cached) / float64(input)
+	}
+	accountID := ""
+	tier := ""
+	if account != nil {
+		accountID = account.GetAccountID()
+		tier = account.PlanTier()
+	}
+	log.WithFields(log.Fields{
+		"account_id":    accountID,
+		"tier":          tier,
+		"model":         model,
+		"input_tokens":  input,
+		"cached_tokens": cached,
+		"hit_ratio":     hitRatio,
+	}).Info("upstream_cache_metric")
 }

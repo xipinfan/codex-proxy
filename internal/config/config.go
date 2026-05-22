@@ -62,6 +62,7 @@ type Config struct {
 	LogLevel              string `yaml:"log-level"`
 	/* DebugUpstreamStream 为 true 时按行/块 Info 打印上游 SSE 原始内容，日志量大且可能含隐私，仅排障时短期开启 */
 	DebugUpstreamStream    bool `yaml:"debug-upstream-stream"`
+	LogCacheMetrics        bool `yaml:"log-cache-metrics"`
 	RefreshInterval        int  `yaml:"refresh-interval"`
 	MaxRetry               int  `yaml:"max-retry"`
 	EnableHealthyRetry     bool `yaml:"enable-healthy-retry"`
@@ -192,6 +193,7 @@ func LoadConfig(path string) (*Config, error) {
 		BackendDomain:                      "",
 		BaseURL:                            "",
 		LogLevel:                           "info",
+		LogCacheMetrics:                    true,
 		RefreshInterval:                    3000,
 		MaxRetry:                           2,
 		EnableHealthyRetry:                 true,

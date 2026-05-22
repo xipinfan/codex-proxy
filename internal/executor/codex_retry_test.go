@@ -190,3 +190,86 @@ func TestSendWithRetryCompressesLargeUpstreamBody(t *testing.T) {
 		t.Fatal("upstream server did not receive request")
 	}
 }
+
+func TestDeriveSessionHintIsStableForAccountAndBody(t *testing.T) {
+	body := []byte(`{"instructions":"keep a stable prefix","input":[{"type":"message","content":[{"type":"input_text","text":"hello"}]}]}`)
+
+	got := deriveSessionHint("account-a", body)
+	if got == "" {
+		t.Fatal("deriveSessionHint() returned empty hint")
+	}
+	if len(got) != 32 {
+		t.Fatalf("deriveSessionHint() length = %d, want 32", len(got))
+	}
+	if got != deriveSessionHint("account-a", body) {
+		t.Fatal("deriveSessionHint() changed for the same account and body")
+	}
+}
+
+func TestDeriveSessionHintChangesWithAccountOrBody(t *testing.T) {
+	body := []byte(`{"instructions":"prefix","input":[{"type":"message","content":"hello"}]}`)
+	otherBody := []byte(`{"instructions":"prefix","input":[{"type":"message","content":"goodbye"}]}`)
+
+	got := deriveSessionHint("account-a", body)
+	if got == deriveSessionHint("account-b", body) {
+		t.Fatal("deriveSessionHint() should change for a different account")
+	}
+	if got == deriveSessionHint("account-a", otherBody) {
+		t.Fatal("deriveSessionHint() should change for a different request body")
+	}
+}
+
+func TestDeriveSessionHintEmptyBody(t *testing.T) {
+	if got := deriveSessionHint("account-a", nil); got != "" {
+		t.Fatalf("deriveSessionHint() = %q, want empty for empty body", got)
+	}
+}
+
+func TestApplyCodexHeadersPrefersExplicitSessionID(t *testing.T) {
+	req, err := http.NewRequest(http.MethodPost, "https://example.com/responses", nil)
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	req.Header.Set("X-Session-Id", "explicit-session")
+
+	applyCodexHeaders(req, testHeaderAccount(), false, "derived-hint")
+
+	if got := req.Header.Get("Session_id"); got != "explicit-session" {
+		t.Fatalf("Session_id = %q, want explicit-session", got)
+	}
+}
+
+func TestApplyCodexHeadersUsesDerivedSessionHint(t *testing.T) {
+	req, err := http.NewRequest(http.MethodPost, "https://example.com/responses", nil)
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+
+	applyCodexHeaders(req, testHeaderAccount(), false, "derived-hint")
+
+	if got := req.Header.Get("Session_id"); got != "derived-hint" {
+		t.Fatalf("Session_id = %q, want derived-hint", got)
+	}
+}
+
+func TestApplyCodexHeadersFallsBackToSessionID(t *testing.T) {
+	req, err := http.NewRequest(http.MethodPost, "https://example.com/responses", nil)
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+
+	applyCodexHeaders(req, testHeaderAccount(), false, "")
+
+	if got := req.Header.Get("Session_id"); got == "" {
+		t.Fatal("Session_id fallback should not be empty")
+	}
+}
+
+func testHeaderAccount() *auth.Account {
+	return &auth.Account{
+		Token: auth.TokenData{
+			AccountID:   "account-a",
+			AccessToken: "access-token",
+		},
+	}
+}

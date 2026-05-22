@@ -8,6 +8,8 @@ package executor
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -86,6 +88,7 @@ type Executor struct {
 	resolveAddr                string
 	keepaliveIntervalSec       int
 	upstreamRequestCompression upstream.CompressionConfig
+	logCacheMetrics            bool
 }
 
 /**
@@ -168,6 +171,13 @@ func NewExecutor(baseURL, proxyURL string, poolCfg HTTPPoolConfig) *Executor {
 		resolveAddr:                strings.TrimSpace(poolCfg.ResolveAddress),
 		keepaliveIntervalSec:       keepaliveSec,
 		upstreamRequestCompression: poolCfg.UpstreamRequestCompression,
+		logCacheMetrics:            true,
+	}
+}
+
+func (e *Executor) SetLogCacheMetrics(enabled bool) {
+	if e != nil {
+		e.logCacheMetrics = enabled
 	}
 }
 
@@ -396,7 +406,7 @@ func (e *Executor) sendWithRetry(ctx context.Context, rc RetryConfig, model stri
 			if err != nil {
 				return nil, fmt.Errorf("%w: %w", errCodexBuildRequest, err)
 			}
-			applyCodexHeaders(httpReq, account, stream)
+			applyCodexHeaders(httpReq, account, stream, deriveSessionHint(account.GetAccountID(), codexBody))
 			for k, v := range encoded.Headers {
 				httpReq.Header.Set(k, v)
 			}
@@ -581,7 +591,7 @@ func (e *Executor) sendWithRetry(ctx context.Context, rc RetryConfig, model stri
 	/* 并发重试：遇 429 后并发用多个账号同时尝试，首个成功者胜出 */
 	if last429 && rc.ConcurrentRetry429 && ctx.Err() == nil {
 		log.Infof("429 并发重试启动: model=%s timeout=%v", model, rc.ConcurrentRetry429Timeout)
-		cResp, cAcc, cAccounts, cErr := e.concurrentRetryAfter429WithHeaders(ctx, rc, model, apiURL, encoded.Body, stream, excluded, encoded.Headers)
+		cResp, cAcc, cAccounts, cErr := e.concurrentRetryAfter429WithHeaders(ctx, rc, model, apiURL, encoded.Body, codexBody, stream, excluded, encoded.Headers)
 		if cErr == nil && cResp != nil {
 			return cResp, cAcc, maxAttempts + 1, nil
 		}
@@ -638,14 +648,14 @@ func (e *Executor) concurrentRetryAfter429(
 	stream bool,
 	excluded map[string]bool,
 ) (*http.Response, *auth.Account, []*auth.Account, error) {
-	return e.concurrentRetryAfter429WithHeaders(parentCtx, rc, model, apiURL, codexBody, stream, excluded, nil)
+	return e.concurrentRetryAfter429WithHeaders(parentCtx, rc, model, apiURL, codexBody, codexBody, stream, excluded, nil)
 }
 
 func (e *Executor) concurrentRetryAfter429WithHeaders(
 	parentCtx context.Context,
 	rc RetryConfig,
 	model, apiURL string,
-	codexBody []byte,
+	codexBody, sessionHintBody []byte,
 	stream bool,
 	excluded map[string]bool,
 	headers map[string]string,
@@ -703,7 +713,7 @@ func (e *Executor) concurrentRetryAfter429WithHeaders(
 				winCh <- result{nil, account, err}
 				return
 			}
-			applyCodexHeaders(httpReq, account, stream)
+			applyCodexHeaders(httpReq, account, stream, deriveSessionHint(account.GetAccountID(), sessionHintBody))
 			for k, v := range headers {
 				httpReq.Header.Set(k, v)
 			}
@@ -847,6 +857,9 @@ func (e *Executor) ExecuteNonStream(ctx context.Context, rc RetryConfig, request
 					log.Warnf("nonstream usage is 0 or not found, model=%s account=%s response=%s, will estimate from output",
 						baseModel, account.GetEmail(), gjson.GetBytes(completedEvent, "response.id").String())
 				}
+				if e.logCacheMetrics {
+					logUpstreamCacheMetric(account, baseModel, usage)
+				}
 				usage = EstimateUsageWithFallback(usage, outputText, estimatedPromptTokens, baseModel)
 				inputTokens, outputTokens, totalTokens = usage.InputTokens, usage.OutputTokens, usage.TotalTokens
 				if inputTokens == 0 && outputTokens == 0 {
@@ -961,6 +974,9 @@ func (e *Executor) ExecuteResponsesNonStream(ctx context.Context, rc RetryConfig
 
 		if resp, ok := extractCompletedResponseObject(data); ok {
 			usage := translator.ExtractResponseUsageFromResponseObjectJSON(resp)
+			if e.logCacheMetrics {
+				logUpstreamCacheMetric(account, baseModel, usage)
+			}
 			usage = EstimateUsageWithFallback(usage, translator.ExtractResponseOutputTextFromResponseObjectJSON(resp), estimatedPromptTokens, baseModel)
 			if usage.FoundUsage && (usage.InputTokens > 0 || usage.OutputTokens > 0) {
 				account.RecordUsage(usage.InputTokens, usage.OutputTokens, usage.TotalTokens)
@@ -1191,6 +1207,9 @@ func (e *Executor) ExecuteResponsesCompactNonStream(ctx context.Context, rc Retr
 	}
 
 	usage := translator.ExtractResponseUsageFromResponseObjectJSON(data)
+	if e.logCacheMetrics {
+		logUpstreamCacheMetric(account, baseModel, usage)
+	}
 	usage = EstimateUsageWithFallback(usage, translator.ExtractResponseOutputTextFromResponseObjectJSON(data), estimatedPromptTokens, baseModel)
 	if usage.FoundUsage && (usage.InputTokens > 0 || usage.OutputTokens > 0) {
 		account.RecordUsage(usage.InputTokens, usage.OutputTokens, usage.TotalTokens)
@@ -1219,6 +1238,7 @@ func (e *Executor) OpenCodexCompactStream(ctx context.Context, rc RetryConfig, r
 		BaseModel:             baseModel,
 		ConvertDur:            convertDur,
 		SendDur:               time.Since(sendStart),
+		LogCacheMetrics:       e.logCacheMetrics,
 		estimatedPromptTokens: estimatePromptTokensFromRequest(requestBody, baseModel),
 	}, nil
 }
@@ -1303,12 +1323,19 @@ func (e *Executor) ExecuteRawCodexStream(ctx context.Context, rc RetryConfig, re
  * @param account - 账号（提供 access_token 和 account_id）
  * @param stream - 是否为流式请求
  */
-func applyCodexHeaders(r *http.Request, account *auth.Account, stream bool) {
+func applyCodexHeaders(r *http.Request, account *auth.Account, stream bool, sessionHint string) {
 	token := account.GetAccessToken()
+	sessionID := r.Header.Get("X-Session-Id")
+	if sessionID == "" {
+		sessionID = sessionHint
+	}
+	if sessionID == "" {
+		sessionID = uuid.NewString()
+	}
 	r.Header.Set("Content-Type", "application/json")
 	r.Header.Set("Authorization", "Bearer "+token)
 	r.Header.Set("Version", codexClientVersion)
-	r.Header.Set("Session_id", uuid.NewString())
+	r.Header.Set("Session_id", sessionID)
 	r.Header.Set("User-Agent", codexUserAgent)
 	r.Header.Set("Origin", "https://chatgpt.com")
 	r.Header.Set("Referer", "https://chatgpt.com/")
@@ -1325,6 +1352,27 @@ func applyCodexHeaders(r *http.Request, account *auth.Account, stream bool) {
 	if accountID != "" {
 		r.Header.Set("Chatgpt-Account-Id", accountID)
 	}
+}
+
+func deriveSessionHint(accountID string, body []byte) string {
+	if len(body) == 0 {
+		return ""
+	}
+
+	prefix := func(s string) string {
+		if len(s) > 256 {
+			return s[:256]
+		}
+		return s
+	}
+
+	h := sha256.New()
+	_, _ = h.Write([]byte(accountID))
+	_, _ = h.Write([]byte{0})
+	_, _ = h.Write([]byte(prefix(gjson.GetBytes(body, "instructions").String())))
+	_, _ = h.Write([]byte{0})
+	_, _ = h.Write([]byte(prefix(gjson.GetBytes(body, "input.0").Raw)))
+	return hex.EncodeToString(h.Sum(nil))[:32]
 }
 
 /**

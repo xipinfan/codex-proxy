@@ -329,6 +329,7 @@ func main() {
 			MinBytes: cfg.UpstreamRequestCompressionMinBytes,
 		},
 	})
+	exec.SetLogCacheMetrics(cfg.LogCacheMetrics)
 
 	/* 延迟启动连接池保活（在服务启动后异步进行） */
 	go func() {

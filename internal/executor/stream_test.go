@@ -104,3 +104,27 @@ func TestCompactPumpParsesUsageWithoutTrailingNewline(t *testing.T) {
 		t.Fatalf("expected usage from trailing completed event, got %+v", usage)
 	}
 }
+
+func TestNewStreamStateCarriesCacheMetricMetadata(t *testing.T) {
+	stream := &CodexResponsesStream{
+		account: &auth.Account{
+			Token: auth.TokenData{
+				AccountID: "acct-stream",
+				PlanType:  "plus",
+			},
+		},
+		BaseModel:       "gpt-5.4",
+		LogCacheMetrics: true,
+	}
+
+	state := stream.newStreamState()
+	if state.AccountID != "acct-stream" {
+		t.Fatalf("AccountID = %q, want acct-stream", state.AccountID)
+	}
+	if state.Tier != auth.PlanTierPaid {
+		t.Fatalf("Tier = %q, want %s", state.Tier, auth.PlanTierPaid)
+	}
+	if !state.LogMetric {
+		t.Fatal("LogMetric = false, want true")
+	}
+}
