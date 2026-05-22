@@ -140,3 +140,32 @@ func TestLoadConfigDefaultsLogCacheMetricsAndAllowsDisablingIt(t *testing.T) {
 		t.Fatal("LogCacheMetrics = true, want disabled false")
 	}
 }
+
+func TestLoadConfigDefaultsSessionAffinityTTLAndAllowsDisablingIt(t *testing.T) {
+	dir := t.TempDir()
+	defaultPath := filepath.Join(dir, "default.yaml")
+	if err := os.WriteFile(defaultPath, []byte("{}\n"), 0600); err != nil {
+		t.Fatalf("write default config: %v", err)
+	}
+
+	cfg, err := LoadConfig(defaultPath)
+	if err != nil {
+		t.Fatalf("LoadConfig(default) error = %v", err)
+	}
+	if cfg.SessionAffinityTTLSec != 1800 {
+		t.Fatalf("SessionAffinityTTLSec = %d, want 1800", cfg.SessionAffinityTTLSec)
+	}
+
+	disabledPath := filepath.Join(dir, "disabled.yaml")
+	if err := os.WriteFile(disabledPath, []byte("session-affinity-ttl-sec: 0\n"), 0600); err != nil {
+		t.Fatalf("write disabled config: %v", err)
+	}
+
+	cfg, err = LoadConfig(disabledPath)
+	if err != nil {
+		t.Fatalf("LoadConfig(disabled) error = %v", err)
+	}
+	if cfg.SessionAffinityTTLSec != 0 {
+		t.Fatalf("SessionAffinityTTLSec = %d, want explicit 0", cfg.SessionAffinityTTLSec)
+	}
+}

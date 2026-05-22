@@ -189,6 +189,9 @@ func (e *Executor) SetLogCacheMetrics(enabled bool) {
  */
 type RetryConfig struct {
 	PickFn                func(model string, excluded map[string]bool) (*auth.Account, error)
+	PickSessionAccountFn  func(sessionKey, model string, excluded map[string]bool) (*auth.Account, error)
+	BindSessionAccountFn  func(sessionKey string, acc *auth.Account)
+	EvictSessionAccountFn func(sessionKey string, acc *auth.Account)
 	HealthyPickFn         func(model string, excluded map[string]bool) (*auth.Account, error)
 	HealthyPickMinAttempt int /* 从第几次尝试起（0-based）改用 HealthyPickFn；0 表示主循环中不用；通常为 max-retry-1 */
 	FallbackRecentPickFn  func(model string, excluded map[string]bool) (*auth.Account, error)
@@ -213,6 +216,8 @@ type RetryConfig struct {
 	PickIgnoringCooldownFn func(model string, excluded map[string]bool) (*auth.Account, error)
 	/* SkipModelAccessClearOnHTTP2xx 用于需要解析 2xx 响应体后才判断成功的路径（如图片 SSE） */
 	SkipModelAccessClearOnHTTP2xx bool
+	/* ExplicitSessionID 为入站显式传入的稳定会话 ID */
+	ExplicitSessionID string
 }
 
 /**
@@ -376,6 +381,13 @@ func IsRetryableStatus(code int) bool {
  * @returns error - 所有重试均失败时返回错误
  */
 func (e *Executor) sendWithRetry(ctx context.Context, rc RetryConfig, model string, apiURL string, codexBody []byte, stream bool) (*http.Response, *auth.Account, int, error) {
+	sessionKey := ""
+	if shouldUseSessionAffinity(rc) {
+		sessionKey = deriveAffinitySessionKey(rc.ExplicitSessionID, codexBody)
+		if sessionKey != "" {
+			codexBody = ensurePromptCacheKey(codexBody, sessionKey)
+		}
+	}
 	encoded, encErr := upstream.EncodeRequestBody(codexBody, e.upstreamRequestCompression)
 	if encErr != nil {
 		return nil, nil, 0, fmt.Errorf("%w: encode upstream request body: %w", errCodexBuildRequest, encErr)
@@ -406,7 +418,7 @@ func (e *Executor) sendWithRetry(ctx context.Context, rc RetryConfig, model stri
 			if err != nil {
 				return nil, fmt.Errorf("%w: %w", errCodexBuildRequest, err)
 			}
-			applyCodexHeaders(httpReq, account, stream, deriveSessionHint(account.GetAccountID(), codexBody))
+			applyCodexHeaders(httpReq, account, stream, sessionKey)
 			for k, v := range encoded.Headers {
 				httpReq.Header.Set(k, v)
 			}
@@ -508,6 +520,9 @@ func (e *Executor) sendWithRetry(ctx context.Context, rc RetryConfig, model stri
 	}
 
 	pickForAttempt := func(attempt int) (*auth.Account, error) {
+		if sessionKey != "" && rc.PickSessionAccountFn != nil {
+			return rc.PickSessionAccountFn(sessionKey, model, excluded)
+		}
 		if attempt == maxAttempts-1 && rc.LastAttemptPickFn != nil {
 			acc, err := rc.LastAttemptPickFn(ctx, model, excluded)
 			if err != nil {
@@ -550,6 +565,9 @@ func (e *Executor) sendWithRetry(ctx context.Context, rc RetryConfig, model stri
 			}
 			if account != nil && account.FilePath != "" {
 				excluded[account.FilePath] = true
+				if sessionKey != "" && rc.EvictSessionAccountFn != nil {
+					rc.EvictSessionAccountFn(sessionKey, account)
+				}
 			}
 			log.Debugf("账号 [%s] 额度预检未通过，同轮次重选 (%d)", account.GetEmail(), q+1)
 			account = nil
@@ -568,6 +586,9 @@ func (e *Executor) sendWithRetry(ctx context.Context, rc RetryConfig, model stri
 		if rc.EnsureTokenFreshFn != nil {
 			if !rc.EnsureTokenFreshFn(ctx, account) {
 				excluded[account.FilePath] = true
+				if sessionKey != "" && rc.EvictSessionAccountFn != nil {
+					rc.EvictSessionAccountFn(sessionKey, account)
+				}
 				log.Debugf("账号 [%s] token 刷新后仍不可用，换号", account.GetEmail())
 				continue
 			}
@@ -575,9 +596,15 @@ func (e *Executor) sendWithRetry(ctx context.Context, rc RetryConfig, model stri
 
 		httpResp, err2 := trySend(account, attempt+1, maxAttempts, pickDur)
 		if err2 == nil {
+			if sessionKey != "" && rc.BindSessionAccountFn != nil {
+				rc.BindSessionAccountFn(sessionKey, account)
+			}
 			return httpResp, account, attempt + 1, nil
 		}
 		excluded[account.FilePath] = true
+		if sessionKey != "" && rc.EvictSessionAccountFn != nil {
+			rc.EvictSessionAccountFn(sessionKey, account)
+		}
 		var se429 *StatusError
 		/* 额度类错误（含 HTTP 403/400 + usage_limit JSON）也走 429 并发扇出，尽快换到有余额的号 */
 		last429 = errors.As(err2, &se429) && (se429.Code == http.StatusTooManyRequests ||
@@ -591,8 +618,11 @@ func (e *Executor) sendWithRetry(ctx context.Context, rc RetryConfig, model stri
 	/* 并发重试：遇 429 后并发用多个账号同时尝试，首个成功者胜出 */
 	if last429 && rc.ConcurrentRetry429 && ctx.Err() == nil {
 		log.Infof("429 并发重试启动: model=%s timeout=%v", model, rc.ConcurrentRetry429Timeout)
-		cResp, cAcc, cAccounts, cErr := e.concurrentRetryAfter429WithHeaders(ctx, rc, model, apiURL, encoded.Body, codexBody, stream, excluded, encoded.Headers)
+		cResp, cAcc, cAccounts, cErr := e.concurrentRetryAfter429WithHeaders(ctx, rc, model, apiURL, encoded.Body, sessionKey, stream, excluded, encoded.Headers)
 		if cErr == nil && cResp != nil {
+			if sessionKey != "" && rc.BindSessionAccountFn != nil && cAcc != nil {
+				rc.BindSessionAccountFn(sessionKey, cAcc)
+			}
 			return cResp, cAcc, maxAttempts + 1, nil
 		}
 		if cErr != nil {
@@ -615,6 +645,9 @@ func (e *Executor) sendWithRetry(ctx context.Context, rc RetryConfig, model stri
 				fbLabel := maxAttempts + 1
 				httpResp, err2 := trySend(fallbackAcc, fbLabel, fbLabel, 0)
 				if err2 == nil {
+					if sessionKey != "" && rc.BindSessionAccountFn != nil {
+						rc.BindSessionAccountFn(sessionKey, fallbackAcc)
+					}
 					return httpResp, fallbackAcc, fbLabel, nil
 				}
 				if errors.Is(err2, errCodexBuildRequest) {
@@ -648,14 +681,19 @@ func (e *Executor) concurrentRetryAfter429(
 	stream bool,
 	excluded map[string]bool,
 ) (*http.Response, *auth.Account, []*auth.Account, error) {
-	return e.concurrentRetryAfter429WithHeaders(parentCtx, rc, model, apiURL, codexBody, codexBody, stream, excluded, nil)
+	sessionHint := ""
+	if shouldUseSessionAffinity(rc) {
+		sessionHint = deriveAffinitySessionKey(rc.ExplicitSessionID, codexBody)
+	}
+	return e.concurrentRetryAfter429WithHeaders(parentCtx, rc, model, apiURL, codexBody, sessionHint, stream, excluded, nil)
 }
 
 func (e *Executor) concurrentRetryAfter429WithHeaders(
 	parentCtx context.Context,
 	rc RetryConfig,
 	model, apiURL string,
-	codexBody, sessionHintBody []byte,
+	codexBody []byte,
+	sessionHint string,
 	stream bool,
 	excluded map[string]bool,
 	headers map[string]string,
@@ -713,7 +751,7 @@ func (e *Executor) concurrentRetryAfter429WithHeaders(
 				winCh <- result{nil, account, err}
 				return
 			}
-			applyCodexHeaders(httpReq, account, stream, deriveSessionHint(account.GetAccountID(), sessionHintBody))
+			applyCodexHeaders(httpReq, account, stream, sessionHint)
 			for k, v := range headers {
 				httpReq.Header.Set(k, v)
 			}
@@ -1354,7 +1392,38 @@ func applyCodexHeaders(r *http.Request, account *auth.Account, stream bool, sess
 	}
 }
 
-func deriveSessionHint(accountID string, body []byte) string {
+func deriveAffinitySessionKey(explicit string, body []byte) string {
+	if explicit = strings.TrimSpace(explicit); explicit != "" {
+		return explicit
+	}
+	if promptCacheKey := strings.TrimSpace(gjson.GetBytes(body, "prompt_cache_key").String()); promptCacheKey != "" {
+		return promptCacheKey
+	}
+	return deriveSessionHint(body)
+}
+
+func ensurePromptCacheKey(body []byte, sessionKey string) []byte {
+	if strings.TrimSpace(sessionKey) == "" || len(body) == 0 {
+		return body
+	}
+	if existing := strings.TrimSpace(gjson.GetBytes(body, "prompt_cache_key").String()); existing != "" {
+		return body
+	}
+	out, err := sjson.SetBytes(body, "prompt_cache_key", sessionKey)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
+func shouldUseSessionAffinity(rc RetryConfig) bool {
+	return strings.TrimSpace(rc.ExplicitSessionID) != "" ||
+		rc.PickSessionAccountFn != nil ||
+		rc.BindSessionAccountFn != nil ||
+		rc.EvictSessionAccountFn != nil
+}
+
+func deriveSessionHint(body []byte) string {
 	if len(body) == 0 {
 		return ""
 	}
@@ -1367,8 +1436,6 @@ func deriveSessionHint(accountID string, body []byte) string {
 	}
 
 	h := sha256.New()
-	_, _ = h.Write([]byte(accountID))
-	_, _ = h.Write([]byte{0})
 	_, _ = h.Write([]byte(prefix(gjson.GetBytes(body, "instructions").String())))
 	_, _ = h.Write([]byte{0})
 	_, _ = h.Write([]byte(prefix(gjson.GetBytes(body, "input.0").Raw)))

@@ -60,6 +60,8 @@ type ManagerOptions struct {
 	QuotaPrecheck bool
 	/* DisableAuth401Remove true 时 401 刷新失败只冷却不删号/禁用，保留账号等周期刷新再尝试 */
 	DisableAuth401Remove bool
+	/* SessionAffinityTTL 为同一会话复用账号的粘性时长；<=0 时关闭 */
+	SessionAffinityTTL time.Duration
 }
 
 /**
@@ -110,6 +112,7 @@ type Manager struct {
 	quotaPrecheck bool
 	/* disableAuth401Remove true 时 401 刷新失败不删号/不禁用，只冷却 */
 	disableAuth401Remove bool
+	sessionAffinity      *sessionAffinityStore
 }
 
 /**
@@ -169,6 +172,11 @@ func NewManager(authDir string, db *sql.DB, proxyURL string, refreshInterval int
 		m.quotaPrecheck = opts.QuotaPrecheck
 		m.disableAuth401Remove = opts.DisableAuth401Remove
 	}
+	ttl := time.Duration(0)
+	if opts != nil {
+		ttl = opts.SessionAffinityTTL
+	}
+	m.sessionAffinity = newSessionAffinityStore(ttl)
 	m.refreshHTTPPolicy = mergeRefreshHTTPPolicies(opts)
 	m.quotaHTTPPolicy = mergeQuotaHTTPPolicies(opts)
 	empty := make([]*Account, 0)
@@ -1118,6 +1126,41 @@ func (m *Manager) PickExcluding(model string, excluded map[string]bool) (*Accoun
 		return m.selector.Pick(model, activeOnly)
 	}
 	return m.selector.Pick(model, filtered)
+}
+
+func (m *Manager) BindSessionAccount(sessionKey string, acc *Account) {
+	if m == nil || acc == nil {
+		return
+	}
+	m.sessionAffinity.Bind(sessionKey, acc.FilePath, time.Now())
+}
+
+func (m *Manager) EvictSessionAccount(sessionKey string, acc *Account) {
+	if m == nil || acc == nil {
+		return
+	}
+	m.sessionAffinity.EvictIfBound(sessionKey, acc.FilePath)
+}
+
+func (m *Manager) PickSessionAccount(sessionKey, model string, excluded map[string]bool) (*Account, error) {
+	now := time.Now()
+	if accountKey, ok := m.sessionAffinity.Lookup(sessionKey, now); ok {
+		accounts := *m.accountsPtr.Load()
+		for _, acc := range accounts {
+			if acc.FilePath != accountKey {
+				continue
+			}
+			if excluded != nil && excluded[acc.FilePath] {
+				return m.PickExcluding(model, excluded)
+			}
+			if accountPickableAt(now.UnixMilli(), model, acc) {
+				return acc, nil
+			}
+			m.sessionAffinity.EvictIfBound(sessionKey, accountKey)
+			break
+		}
+	}
+	return m.PickExcluding(model, excluded)
 }
 
 /**

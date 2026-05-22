@@ -208,6 +208,7 @@ func main() {
 		DBDialect:                     dbDialect,
 		QuotaPrecheck:                 cfg.QuotaPrecheck,
 		DisableAuth401Remove:          cfg.DisableAuth401Remove,
+		SessionAffinityTTL:            time.Duration(cfg.SessionAffinityTTLSec) * time.Second,
 	}
 	manager := auth.NewManager(cfg.AuthDir, db, cfg.ProxyURL, cfg.RefreshInterval, selector, cfg.EnableHTTP2, managerOpts)
 	manager.SetRefreshConcurrency(cfg.RefreshConcurrency)

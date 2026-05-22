@@ -191,36 +191,53 @@ func TestSendWithRetryCompressesLargeUpstreamBody(t *testing.T) {
 	}
 }
 
-func TestDeriveSessionHintIsStableForAccountAndBody(t *testing.T) {
+func TestDeriveAffinitySessionKeyPrefersExplicitHeader(t *testing.T) {
 	body := []byte(`{"instructions":"keep a stable prefix","input":[{"type":"message","content":[{"type":"input_text","text":"hello"}]}]}`)
 
-	got := deriveSessionHint("account-a", body)
+	if got := deriveAffinitySessionKey(" explicit-session ", body); got != "explicit-session" {
+		t.Fatalf("deriveAffinitySessionKey() = %q, want explicit-session", got)
+	}
+}
+
+func TestDeriveAffinitySessionKeyIgnoresAccountIdentity(t *testing.T) {
+	body := []byte(`{"instructions":"keep a stable prefix","input":[{"type":"message","content":[{"type":"input_text","text":"hello"}]}]}`)
+
+	got := deriveAffinitySessionKey("", body)
+	if got == "" {
+		t.Fatal("deriveAffinitySessionKey() returned empty key")
+	}
+	if got != deriveAffinitySessionKey("", body) {
+		t.Fatal("deriveAffinitySessionKey() changed for the same request body")
+	}
+}
+
+func TestDeriveSessionHintIsStableForBody(t *testing.T) {
+	body := []byte(`{"instructions":"keep a stable prefix","input":[{"type":"message","content":[{"type":"input_text","text":"hello"}]}]}`)
+
+	got := deriveSessionHint(body)
 	if got == "" {
 		t.Fatal("deriveSessionHint() returned empty hint")
 	}
 	if len(got) != 32 {
 		t.Fatalf("deriveSessionHint() length = %d, want 32", len(got))
 	}
-	if got != deriveSessionHint("account-a", body) {
-		t.Fatal("deriveSessionHint() changed for the same account and body")
+	if got != deriveSessionHint(body) {
+		t.Fatal("deriveSessionHint() changed for the same body")
 	}
 }
 
-func TestDeriveSessionHintChangesWithAccountOrBody(t *testing.T) {
+func TestDeriveSessionHintChangesWithBodyOnly(t *testing.T) {
 	body := []byte(`{"instructions":"prefix","input":[{"type":"message","content":"hello"}]}`)
 	otherBody := []byte(`{"instructions":"prefix","input":[{"type":"message","content":"goodbye"}]}`)
 
-	got := deriveSessionHint("account-a", body)
-	if got == deriveSessionHint("account-b", body) {
-		t.Fatal("deriveSessionHint() should change for a different account")
-	}
-	if got == deriveSessionHint("account-a", otherBody) {
+	got := deriveSessionHint(body)
+	if got == deriveSessionHint(otherBody) {
 		t.Fatal("deriveSessionHint() should change for a different request body")
 	}
 }
 
 func TestDeriveSessionHintEmptyBody(t *testing.T) {
-	if got := deriveSessionHint("account-a", nil); got != "" {
+	if got := deriveSessionHint(nil); got != "" {
 		t.Fatalf("deriveSessionHint() = %q, want empty for empty body", got)
 	}
 }
@@ -262,6 +279,115 @@ func TestApplyCodexHeadersFallsBackToSessionID(t *testing.T) {
 
 	if got := req.Header.Get("Session_id"); got == "" {
 		t.Fatal("Session_id fallback should not be empty")
+	}
+}
+
+func TestSendWithRetryBindsSessionAccountOnSuccess(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer upstream.Close()
+
+	acc := &auth.Account{
+		FilePath: "sticky.json",
+		Token: auth.TokenData{
+			Email:       "sticky@example.com",
+			AccessToken: "access-token",
+		},
+		Status: auth.StatusActive,
+	}
+	acc.SetActive()
+
+	var boundSession string
+	var boundAccount string
+	executor := &Executor{httpClient: upstream.Client()}
+	rc := RetryConfig{
+		ExplicitSessionID: "session-a",
+		PickFn: func(model string, excluded map[string]bool) (*auth.Account, error) {
+			return acc, nil
+		},
+		BindSessionAccountFn: func(sessionKey string, acc *auth.Account) {
+			boundSession = sessionKey
+			boundAccount = acc.FilePath
+		},
+	}
+
+	resp, _, _, err := executor.sendWithRetry(context.Background(), rc, "gpt-5.5", upstream.URL, []byte(`{"input":"hello"}`), false)
+	if err != nil {
+		t.Fatalf("sendWithRetry() error = %v", err)
+	}
+	defer resp.Body.Close()
+	if boundSession != "session-a" {
+		t.Fatalf("bound session = %q, want session-a", boundSession)
+	}
+	if boundAccount != acc.FilePath {
+		t.Fatalf("bound account = %q, want %q", boundAccount, acc.FilePath)
+	}
+}
+
+func TestSendWithRetryEvictsFailedBoundAccountBeforeRetry(t *testing.T) {
+	var requests int
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if requests == 1 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"error":{"message":"rate limited"}}`))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer upstream.Close()
+
+	first := &auth.Account{
+		FilePath: "first.json",
+		Token: auth.TokenData{
+			Email:       "first@example.com",
+			AccessToken: "access-token-1",
+		},
+		Status: auth.StatusActive,
+	}
+	first.SetActive()
+	second := &auth.Account{
+		FilePath: "second.json",
+		Token: auth.TokenData{
+			Email:       "second@example.com",
+			AccessToken: "access-token-2",
+		},
+		Status: auth.StatusActive,
+	}
+	second.SetActive()
+
+	var evicted []string
+	executor := &Executor{httpClient: upstream.Client()}
+	rc := RetryConfig{
+		ExplicitSessionID: "session-a",
+		MaxRetry:          1,
+		PickSessionAccountFn: func(sessionKey, model string, excluded map[string]bool) (*auth.Account, error) {
+			if !excluded[first.FilePath] {
+				return first, nil
+			}
+			return second, nil
+		},
+		EvictSessionAccountFn: func(sessionKey string, acc *auth.Account) {
+			evicted = append(evicted, sessionKey+":"+acc.FilePath)
+		},
+	}
+
+	resp, used, attempts, err := executor.sendWithRetry(context.Background(), rc, "gpt-5.5", upstream.URL, []byte(`{"input":"hello"}`), false)
+	if err != nil {
+		t.Fatalf("sendWithRetry() error = %v", err)
+	}
+	defer resp.Body.Close()
+	if used != second {
+		t.Fatalf("used account = %s, want %s", used.GetEmail(), second.GetEmail())
+	}
+	if attempts != 2 {
+		t.Fatalf("attempts = %d, want 2", attempts)
+	}
+	if len(evicted) == 0 || evicted[0] != "session-a:first.json" {
+		t.Fatalf("evicted = %v, want first bound account eviction", evicted)
 	}
 }
 

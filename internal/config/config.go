@@ -126,6 +126,7 @@ type Config struct {
 	FreeAccountRole         string   `yaml:"free-account-role"`
 	FreeAccountCutoff       int      `yaml:"free-account-cutoff"`
 	RefreshBatchSize        int      `yaml:"refresh-batch-size"`
+	SessionAffinityTTLSec   int      `yaml:"session-affinity-ttl-sec"`
 	Accounts                []string `yaml:"accounts"`
 	APIKeys                 []string `yaml:"api-keys"`
 	/* EnableModelSuffixFast 控制是否允许模型名中的 -fast 子参数，并同步影响 /v1/models 枚举 */
@@ -233,6 +234,7 @@ func LoadConfig(path string) (*Config, error) {
 		FreeAccountRole:                    "fallback",
 		FreeAccountCutoff:                  70,
 		RefreshBatchSize:                   0,
+		SessionAffinityTTLSec:              1800,
 		EnableModelSuffixFast:              true,
 		EnableModelSuffix1M:                true,
 		EnableModelSuffixImage:             true,

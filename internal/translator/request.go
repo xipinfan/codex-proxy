@@ -91,7 +91,6 @@ func ConvertOpenAIRequestToCodex(modelName string, rawJSON []byte, stream bool, 
 		if !gjson.GetBytes(result, "instructions").Exists() {
 			result, _ = sjson.SetBytes(result, "instructions", "")
 		}
-		result, _ = sjson.DeleteBytes(result, "previous_response_id")
 		result, _ = sjson.DeleteBytes(result, "stream_options")
 		result, _ = sjson.DeleteBytes(result, "prompt_cache_retention")
 		result, _ = sjson.DeleteBytes(result, "safety_identifier")

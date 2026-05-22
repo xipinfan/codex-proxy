@@ -400,6 +400,15 @@ func (h *ProxyHandler) buildRetryConfig() executor.RetryConfig {
 	return h.retryCfg
 }
 
+func (h *ProxyHandler) buildRequestRetryConfig(ctx *fasthttp.RequestCtx) executor.RetryConfig {
+	rc := h.buildRequestRetryConfig(ctx)
+	rc.ExplicitSessionID = strings.TrimSpace(string(ctx.Request.Header.Peek("X-Session-Id")))
+	rc.PickSessionAccountFn = h.manager.PickSessionAccount
+	rc.BindSessionAccountFn = h.manager.BindSessionAccount
+	rc.EvictSessionAccountFn = h.manager.EvictSessionAccount
+	return rc
+}
+
 func (h *ProxyHandler) buildRetryConfigOnce() executor.RetryConfig {
 	healthyPick := func(model string, excluded map[string]bool) (*auth.Account, error) {
 		return h.manager.PickRecentlySuccessful(model, excluded)
@@ -663,7 +672,7 @@ func (h *ProxyHandler) handleChatCompletions(ctx *fasthttp.RequestCtx) {
 
 	log.Debugf("收到请求: model=%s, stream=%v", model, stream)
 
-	rc := h.buildRetryConfig()
+	rc := h.buildRequestRetryConfig(ctx)
 
 	if stream {
 		/* 头与状态在 StreamWriter 外发送；Open+Pump 在 Writer 内完成，上游断连等在响应体尚无字节时可内部多轮全量重连，最后再向客户端写 SSE 错误 */
@@ -1155,7 +1164,7 @@ func (h *ProxyHandler) handleResponsesWS(ctx *fasthttp.RequestCtx) {
 				}
 
 				log.Debugf("responses ws: model=%s", model)
-				rc := h.buildRetryConfig()
+				rc := h.buildRequestRetryConfig(ctx)
 				streamErr := h.forwardResponsesSSEAsWSSession(ctx, sess, rc, requestBody, model)
 				if streamErr == nil {
 					RecordRequest()
@@ -1325,7 +1334,7 @@ func (h *ProxyHandler) handleResponsesCompact(ctx *fasthttp.RequestCtx) {
 
 	log.Debugf("收到 Responses Compact 请求: model=%s, stream=%v", model, stream)
 
-	rc := h.buildRetryConfig()
+	rc := h.buildRequestRetryConfig(ctx)
 
 	if stream {
 		compact, openErr := h.executor.OpenCodexCompactStream(ctx, rc, body, model)

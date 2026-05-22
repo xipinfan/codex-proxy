@@ -214,6 +214,9 @@ startup-async-load: true
 # 刷新批大小（0=不分批）；>0 时每批完成后再启下一批，降低大账号数时的内存
 # refresh-batch-size: 0
 
+# 同一会话成功后优先复用同账号的粘性时长（秒），提升 Prompt Cache 命中；0 关闭
+# session-affinity-ttl-sec: 1800
+
 # 连接池配置；HTTP/2 下单主机连接数过高易触发上游 GOAWAY ENHANCE_YOUR_CALM，宜酌情调低 max-conns-per-host / max-idle-conns-per-host
 max-conns-per-host: 512
 max-idle-conns: 1024

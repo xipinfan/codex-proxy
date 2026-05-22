@@ -51,6 +51,7 @@
 | `refresh-interval`                  | `3000`  | 后台自动刷新 Token 间隔（秒）。                                                                                         |
 | `refresh-concurrency`               | `50`    | 并发刷新数；账号量极大时可酌情调高。                                                                                          |
 | `refresh-batch-size`                | `0`     | `>0` 时分批刷新，降低峰值内存。                                                                                          |
+| `session-affinity-ttl-sec`          | `1800`  | 同一会话优先复用同一账号的粘性时长（秒），提升 Prompt Cache 局部性；`<=0` 关闭。                                                         |
 | `refresh-single-timeout-sec`        | `30`    | 单次 OAuth/刷新请求超时（秒）。                                                                                         |
 | `refresh-http-429-action`           | 空（内置逻辑） | 刷新遇 HTTP 429：`cooldown` | `remove` | `disable`（简写，等价单阶段策略）。                                                 |
 | `quota-http-429-action`             | 空       | 额度接口遇 429 的简写。                                                                                              |
