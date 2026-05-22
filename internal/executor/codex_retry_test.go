@@ -206,22 +206,38 @@ func TestDeriveSessionHintIsStableForAccountAndBody(t *testing.T) {
 	}
 }
 
-func TestDeriveSessionHintChangesWithAccountOrBody(t *testing.T) {
+func TestDeriveSessionHintIgnoresAccountIdentity(t *testing.T) {
 	body := []byte(`{"instructions":"prefix","input":[{"type":"message","content":"hello"}]}`)
-	otherBody := []byte(`{"instructions":"prefix","input":[{"type":"message","content":"goodbye"}]}`)
 
 	got := deriveSessionHint("account-a", body)
-	if got == deriveSessionHint("account-b", body) {
-		t.Fatal("deriveSessionHint() should change for a different account")
-	}
-	if got == deriveSessionHint("account-a", otherBody) {
-		t.Fatal("deriveSessionHint() should change for a different request body")
+	if got != deriveSessionHint("account-b", body) {
+		t.Fatal("deriveSessionHint() should ignore account identity")
 	}
 }
 
 func TestDeriveSessionHintEmptyBody(t *testing.T) {
 	if got := deriveSessionHint("account-a", nil); got != "" {
 		t.Fatalf("deriveSessionHint() = %q, want empty for empty body", got)
+	}
+}
+
+func TestDeriveAffinitySessionKeyIgnoresAccountIdentity(t *testing.T) {
+	body := []byte(`{"instructions":"prefix","input":[{"type":"message","content":"hello"}]}`)
+
+	first := deriveAffinitySessionKey("", body)
+	if first == "" {
+		t.Fatal("deriveAffinitySessionKey() returned empty key")
+	}
+	if first != deriveAffinitySessionKey("", body) {
+		t.Fatal("fallback affinity key changed for the same stable prefix")
+	}
+}
+
+func TestDeriveAffinitySessionKeyPrefersExplicitHeader(t *testing.T) {
+	body := []byte(`{"instructions":"prefix","input":[{"type":"message","content":"hello"}]}`)
+
+	if got := deriveAffinitySessionKey(" explicit-session ", body); got != "explicit-session" {
+		t.Fatalf("deriveAffinitySessionKey() = %q, want explicit-session", got)
 	}
 }
 
@@ -262,6 +278,308 @@ func TestApplyCodexHeadersFallsBackToSessionID(t *testing.T) {
 
 	if got := req.Header.Get("Session_id"); got == "" {
 		t.Fatal("Session_id fallback should not be empty")
+	}
+}
+
+func TestSendWithRetryUsesSessionAwarePick(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Session_id"); got != "session-a" {
+			t.Fatalf("Session_id = %q, want session-a", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer upstream.Close()
+
+	acc := &auth.Account{
+		FilePath: "session-aware.json",
+		Token: auth.TokenData{
+			Email:       "session-aware@example.com",
+			AccessToken: "access-token",
+		},
+		Status: auth.StatusActive,
+	}
+	acc.SetActive()
+
+	executor := &Executor{httpClient: upstream.Client()}
+	var pickSessionKey string
+	var regularPicks int
+	rc := RetryConfig{
+		ExplicitSessionID: "session-a",
+		PickFn: func(model string, excluded map[string]bool) (*auth.Account, error) {
+			regularPicks++
+			return nil, fmt.Errorf("regular pick should not be used")
+		},
+		PickSessionAccountFn: func(sessionKey, model string, excluded map[string]bool) (*auth.Account, error) {
+			pickSessionKey = sessionKey
+			return acc, nil
+		},
+	}
+
+	resp, used, _, err := executor.sendWithRetry(context.Background(), rc, "gpt-5.5", upstream.URL, []byte(`{"input":"hello"}`), false)
+	if err != nil {
+		t.Fatalf("sendWithRetry() error = %v", err)
+	}
+	defer resp.Body.Close()
+	if pickSessionKey != "session-a" {
+		t.Fatalf("PickSessionAccountFn sessionKey = %q, want session-a", pickSessionKey)
+	}
+	if regularPicks != 0 {
+		t.Fatalf("regular PickFn called %d times, want 0", regularPicks)
+	}
+	if used != acc {
+		t.Fatalf("used account = %v, want session-aware account", used)
+	}
+}
+
+func TestSendWithRetryBindsSuccessfulSessionAccount(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer upstream.Close()
+
+	acc := &auth.Account{
+		FilePath: "success.json",
+		Token: auth.TokenData{
+			Email:       "success@example.com",
+			AccessToken: "access-token",
+		},
+		Status: auth.StatusActive,
+	}
+	acc.SetActive()
+
+	executor := &Executor{httpClient: upstream.Client()}
+	var boundKey string
+	var boundAccount *auth.Account
+	rc := RetryConfig{
+		ExplicitSessionID: "session-a",
+		PickFn: func(model string, excluded map[string]bool) (*auth.Account, error) {
+			return acc, nil
+		},
+		BindSessionAccountFn: func(sessionKey string, acc *auth.Account) {
+			boundKey = sessionKey
+			boundAccount = acc
+		},
+	}
+
+	resp, used, _, err := executor.sendWithRetry(context.Background(), rc, "gpt-5.5", upstream.URL, []byte(`{"input":"hello"}`), false)
+	if err != nil {
+		t.Fatalf("sendWithRetry() error = %v", err)
+	}
+	defer resp.Body.Close()
+	if used != acc {
+		t.Fatalf("used account = %v, want success account", used)
+	}
+	if boundKey != "session-a" {
+		t.Fatalf("bound sessionKey = %q, want session-a", boundKey)
+	}
+	if boundAccount != acc {
+		t.Fatalf("bound account = %v, want success account", boundAccount)
+	}
+}
+
+func TestSendWithRetryEvictsFailedBoundSessionAccountBeforeReplacement(t *testing.T) {
+	var requests int
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if requests == 1 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"error":{"message":"rate limited"}}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer upstream.Close()
+
+	acc1 := &auth.Account{
+		FilePath: "rate-limited.json",
+		Token: auth.TokenData{
+			Email:       "rate-limited@example.com",
+			AccessToken: "access-token-1",
+		},
+		Status: auth.StatusActive,
+	}
+	acc1.SetActive()
+	acc2 := &auth.Account{
+		FilePath: "replacement.json",
+		Token: auth.TokenData{
+			Email:       "replacement@example.com",
+			AccessToken: "access-token-2",
+		},
+		Status: auth.StatusActive,
+	}
+	acc2.SetActive()
+
+	executor := &Executor{httpClient: upstream.Client()}
+	var evictedKey string
+	var evictedAccount *auth.Account
+	var boundKey string
+	var boundAccount *auth.Account
+	rc := RetryConfig{
+		MaxRetry:          1,
+		ExplicitSessionID: "session-a",
+		PickFn: func(model string, excluded map[string]bool) (*auth.Account, error) {
+			if !excluded[acc1.FilePath] {
+				return acc1, nil
+			}
+			return acc2, nil
+		},
+		BindSessionAccountFn: func(sessionKey string, acc *auth.Account) {
+			boundKey = sessionKey
+			boundAccount = acc
+		},
+		EvictSessionAccountFn: func(sessionKey string, acc *auth.Account) {
+			evictedKey = sessionKey
+			evictedAccount = acc
+		},
+	}
+
+	resp, used, attempts, err := executor.sendWithRetry(context.Background(), rc, "gpt-5.5", upstream.URL, []byte(`{"input":"hello"}`), false)
+	if err != nil {
+		t.Fatalf("sendWithRetry() error = %v", err)
+	}
+	defer resp.Body.Close()
+	if attempts != 2 {
+		t.Fatalf("attempts = %d, want 2", attempts)
+	}
+	if used != acc2 {
+		t.Fatalf("used account = %v, want replacement account", used)
+	}
+	if evictedKey != "session-a" {
+		t.Fatalf("evicted sessionKey = %q, want session-a", evictedKey)
+	}
+	if evictedAccount != acc1 {
+		t.Fatalf("evicted account = %v, want first account", evictedAccount)
+	}
+	if boundKey != "session-a" {
+		t.Fatalf("bound sessionKey = %q, want session-a", boundKey)
+	}
+	if boundAccount != acc2 {
+		t.Fatalf("bound account = %v, want replacement account", boundAccount)
+	}
+}
+
+func TestSendWithRetryEvictsQuotaRejectedSessionAccount(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer upstream.Close()
+
+	acc1 := &auth.Account{
+		FilePath: "quota-rejected.json",
+		Token: auth.TokenData{
+			Email:       "quota-rejected@example.com",
+			AccessToken: "access-token-1",
+		},
+		Status: auth.StatusActive,
+	}
+	acc1.SetActive()
+	acc2 := &auth.Account{
+		FilePath: "quota-ok.json",
+		Token: auth.TokenData{
+			Email:       "quota-ok@example.com",
+			AccessToken: "access-token-2",
+		},
+		Status: auth.StatusActive,
+	}
+	acc2.SetActive()
+
+	executor := &Executor{httpClient: upstream.Client()}
+	var evictedAccount *auth.Account
+	rc := RetryConfig{
+		ExplicitSessionID: "session-a",
+		PickFn: func(model string, excluded map[string]bool) (*auth.Account, error) {
+			if !excluded[acc1.FilePath] {
+				return acc1, nil
+			}
+			return acc2, nil
+		},
+		QuotaCheckFn: func(ctx context.Context, acc *auth.Account) bool {
+			return acc != acc1
+		},
+		EvictSessionAccountFn: func(sessionKey string, acc *auth.Account) {
+			if sessionKey == "session-a" {
+				evictedAccount = acc
+			}
+		},
+	}
+
+	resp, used, _, err := executor.sendWithRetry(context.Background(), rc, "gpt-5.5", upstream.URL, []byte(`{"input":"hello"}`), false)
+	if err != nil {
+		t.Fatalf("sendWithRetry() error = %v", err)
+	}
+	defer resp.Body.Close()
+	if used != acc2 {
+		t.Fatalf("used account = %v, want quota-ok account", used)
+	}
+	if evictedAccount != acc1 {
+		t.Fatalf("evicted account = %v, want quota-rejected account", evictedAccount)
+	}
+}
+
+func TestSendWithRetryEvictsTokenRejectedSessionAccount(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer upstream.Close()
+
+	acc1 := &auth.Account{
+		FilePath: "stale-token.json",
+		Token: auth.TokenData{
+			Email:       "stale-token@example.com",
+			AccessToken: "access-token-1",
+		},
+		Status: auth.StatusActive,
+	}
+	acc1.SetActive()
+	acc2 := &auth.Account{
+		FilePath: "fresh-token.json",
+		Token: auth.TokenData{
+			Email:       "fresh-token@example.com",
+			AccessToken: "access-token-2",
+		},
+		Status: auth.StatusActive,
+	}
+	acc2.SetActive()
+
+	executor := &Executor{httpClient: upstream.Client()}
+	var evictedAccount *auth.Account
+	rc := RetryConfig{
+		MaxRetry:          1,
+		ExplicitSessionID: "session-a",
+		PickFn: func(model string, excluded map[string]bool) (*auth.Account, error) {
+			if !excluded[acc1.FilePath] {
+				return acc1, nil
+			}
+			return acc2, nil
+		},
+		EnsureTokenFreshFn: func(ctx context.Context, acc *auth.Account) bool {
+			return acc != acc1
+		},
+		EvictSessionAccountFn: func(sessionKey string, acc *auth.Account) {
+			if sessionKey == "session-a" {
+				evictedAccount = acc
+			}
+		},
+	}
+
+	resp, used, attempts, err := executor.sendWithRetry(context.Background(), rc, "gpt-5.5", upstream.URL, []byte(`{"input":"hello"}`), false)
+	if err != nil {
+		t.Fatalf("sendWithRetry() error = %v", err)
+	}
+	defer resp.Body.Close()
+	if attempts != 2 {
+		t.Fatalf("attempts = %d, want 2", attempts)
+	}
+	if used != acc2 {
+		t.Fatalf("used account = %v, want fresh-token account", used)
+	}
+	if evictedAccount != acc1 {
+		t.Fatalf("evicted account = %v, want stale-token account", evictedAccount)
 	}
 }
 

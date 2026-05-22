@@ -188,7 +188,12 @@ func (e *Executor) SetLogCacheMetrics(enabled bool) {
  * @field LastAttemptPickFn - 最后一轮选号专用（与 max-retry 最后一格对齐）
  */
 type RetryConfig struct {
-	PickFn                func(model string, excluded map[string]bool) (*auth.Account, error)
+	PickFn func(model string, excluded map[string]bool) (*auth.Account, error)
+	/* ExplicitSessionID is the inbound X-Session-Id preferred for request affinity and upstream Session_id. */
+	ExplicitSessionID     string
+	PickSessionAccountFn  func(sessionKey, model string, excluded map[string]bool) (*auth.Account, error)
+	BindSessionAccountFn  func(sessionKey string, acc *auth.Account)
+	EvictSessionAccountFn func(sessionKey string, acc *auth.Account)
 	HealthyPickFn         func(model string, excluded map[string]bool) (*auth.Account, error)
 	HealthyPickMinAttempt int /* 从第几次尝试起（0-based）改用 HealthyPickFn；0 表示主循环中不用；通常为 max-retry-1 */
 	FallbackRecentPickFn  func(model string, excluded map[string]bool) (*auth.Account, error)
@@ -232,6 +237,13 @@ func MergeRetryConfigExcluded(rc RetryConfig, extra map[string]bool) RetryConfig
 	out.PickFn = func(m string, excl map[string]bool) (*auth.Account, error) {
 		merge(excl)
 		return rc.PickFn(m, excl)
+	}
+	if rc.PickSessionAccountFn != nil {
+		p := rc.PickSessionAccountFn
+		out.PickSessionAccountFn = func(sessionKey, m string, excl map[string]bool) (*auth.Account, error) {
+			merge(excl)
+			return p(sessionKey, m, excl)
+		}
 	}
 	if rc.HealthyPickFn != nil {
 		h := rc.HealthyPickFn
@@ -381,8 +393,26 @@ func (e *Executor) sendWithRetry(ctx context.Context, rc RetryConfig, model stri
 		return nil, nil, 0, fmt.Errorf("%w: encode upstream request body: %w", errCodexBuildRequest, encErr)
 	}
 
+	sessionKey := deriveAffinitySessionKey(rc.ExplicitSessionID, codexBody)
+	bindSuccess := func(acc *auth.Account) {
+		if sessionKey != "" && rc.BindSessionAccountFn != nil && acc != nil {
+			rc.BindSessionAccountFn(sessionKey, acc)
+		}
+	}
+	evict := func(acc *auth.Account) {
+		if sessionKey != "" && rc.EvictSessionAccountFn != nil && acc != nil {
+			rc.EvictSessionAccountFn(sessionKey, acc)
+		}
+	}
+
 	maxAttempts := rc.MaxRetry + 1
 	excluded := make(map[string]bool, maxAttempts+8)
+	excludeAccount := func(acc *auth.Account) {
+		if acc != nil && acc.FilePath != "" {
+			excluded[acc.FilePath] = true
+		}
+		evict(acc)
+	}
 	var lastErr error
 	var last429 bool /* 最近一次失败是否为 429 */
 
@@ -406,7 +436,7 @@ func (e *Executor) sendWithRetry(ctx context.Context, rc RetryConfig, model stri
 			if err != nil {
 				return nil, fmt.Errorf("%w: %w", errCodexBuildRequest, err)
 			}
-			applyCodexHeaders(httpReq, account, stream, deriveSessionHint(account.GetAccountID(), codexBody))
+			applyCodexHeaders(httpReq, account, stream, sessionKey)
 			for k, v := range encoded.Headers {
 				httpReq.Header.Set(k, v)
 			}
@@ -428,6 +458,7 @@ func (e *Executor) sendWithRetry(ctx context.Context, rc RetryConfig, model stri
 				if !rc.SkipModelAccessClearOnHTTP2xx {
 					account.ClearModelAccessFailure(model)
 				}
+				bindSuccess(account)
 				log.Debugf("send stage model=%s account=%s attempt=%d/%d pick=%v build=%v upstream_wait=%v total=%v status=%d", model, account.GetEmail(), attemptOneBased, maxLabel, pickDur, buildDur, doDur, time.Since(startAttempt), httpResp.StatusCode)
 				log.Debugf("send attempt success status=%d account=%s elapsed=%v", httpResp.StatusCode, account.GetEmail(), time.Since(startAttempt).Round(time.Millisecond))
 				return httpResp, nil
@@ -507,6 +538,13 @@ func (e *Executor) sendWithRetry(ctx context.Context, rc RetryConfig, model stri
 		return false, nil
 	}
 
+	pickPrimary := func(model string, excluded map[string]bool) (*auth.Account, error) {
+		if sessionKey != "" && rc.PickSessionAccountFn != nil {
+			return rc.PickSessionAccountFn(sessionKey, model, excluded)
+		}
+		return rc.PickFn(model, excluded)
+	}
+
 	pickForAttempt := func(attempt int) (*auth.Account, error) {
 		if attempt == maxAttempts-1 && rc.LastAttemptPickFn != nil {
 			acc, err := rc.LastAttemptPickFn(ctx, model, excluded)
@@ -521,12 +559,12 @@ func (e *Executor) sendWithRetry(ctx context.Context, rc RetryConfig, model stri
 		if rc.HealthyPickMinAttempt > 0 && attempt >= rc.HealthyPickMinAttempt && rc.HealthyPickFn != nil {
 			account, err := rc.HealthyPickFn(model, excluded)
 			if err != nil {
-				return rc.PickFn(model, excluded)
+				return pickPrimary(model, excluded)
 			}
 			log.Debugf("选号: 尝试 %d/%d 使用最近成功账号策略 account=%s", attempt+1, maxAttempts, account.GetEmail())
 			return account, nil
 		}
-		return rc.PickFn(model, excluded)
+		return pickPrimary(model, excluded)
 	}
 
 	const maxQuotaReselects = 256
@@ -548,9 +586,7 @@ func (e *Executor) sendWithRetry(ctx context.Context, rc RetryConfig, model stri
 			if rc.QuotaCheckFn == nil || rc.QuotaCheckFn(ctx, account) {
 				break
 			}
-			if account != nil && account.FilePath != "" {
-				excluded[account.FilePath] = true
-			}
+			excludeAccount(account)
 			log.Debugf("账号 [%s] 额度预检未通过，同轮次重选 (%d)", account.GetEmail(), q+1)
 			account = nil
 		}
@@ -567,7 +603,7 @@ func (e *Executor) sendWithRetry(ctx context.Context, rc RetryConfig, model stri
 		/* 发送上游前检查 token 新鲜度，即将过期则内联刷新 */
 		if rc.EnsureTokenFreshFn != nil {
 			if !rc.EnsureTokenFreshFn(ctx, account) {
-				excluded[account.FilePath] = true
+				excludeAccount(account)
 				log.Debugf("账号 [%s] token 刷新后仍不可用，换号", account.GetEmail())
 				continue
 			}
@@ -577,7 +613,7 @@ func (e *Executor) sendWithRetry(ctx context.Context, rc RetryConfig, model stri
 		if err2 == nil {
 			return httpResp, account, attempt + 1, nil
 		}
-		excluded[account.FilePath] = true
+		excludeAccount(account)
 		var se429 *StatusError
 		/* 额度类错误（含 HTTP 403/400 + usage_limit JSON）也走 429 并发扇出，尽快换到有余额的号 */
 		last429 = errors.As(err2, &se429) && (se429.Code == http.StatusTooManyRequests ||
@@ -593,6 +629,7 @@ func (e *Executor) sendWithRetry(ctx context.Context, rc RetryConfig, model stri
 		log.Infof("429 并发重试启动: model=%s timeout=%v", model, rc.ConcurrentRetry429Timeout)
 		cResp, cAcc, cAccounts, cErr := e.concurrentRetryAfter429WithHeaders(ctx, rc, model, apiURL, encoded.Body, codexBody, stream, excluded, encoded.Headers)
 		if cErr == nil && cResp != nil {
+			bindSuccess(cAcc)
 			return cResp, cAcc, maxAttempts + 1, nil
 		}
 		if cErr != nil {
@@ -664,6 +701,7 @@ func (e *Executor) concurrentRetryAfter429WithHeaders(
 	if timeout <= 0 {
 		timeout = 30 * time.Second
 	}
+	sessionKey := deriveAffinitySessionKey(rc.ExplicitSessionID, sessionHintBody)
 
 	/* 尝试选取最多 fanOut 个不同账号 */
 	const fanOut = 5
@@ -681,6 +719,9 @@ func (e *Executor) concurrentRetryAfter429WithHeaders(
 		/* token 新鲜度检查 */
 		if rc.EnsureTokenFreshFn != nil && !rc.EnsureTokenFreshFn(parentCtx, acc) {
 			exclCopy[acc.FilePath] = true
+			if sessionKey != "" && rc.EvictSessionAccountFn != nil {
+				rc.EvictSessionAccountFn(sessionKey, acc)
+			}
 			continue
 		}
 		accounts = append(accounts, acc)
@@ -713,7 +754,7 @@ func (e *Executor) concurrentRetryAfter429WithHeaders(
 				winCh <- result{nil, account, err}
 				return
 			}
-			applyCodexHeaders(httpReq, account, stream, deriveSessionHint(account.GetAccountID(), sessionHintBody))
+			applyCodexHeaders(httpReq, account, stream, sessionKey)
 			for k, v := range headers {
 				httpReq.Header.Set(k, v)
 			}
@@ -1354,7 +1395,14 @@ func applyCodexHeaders(r *http.Request, account *auth.Account, stream bool, sess
 	}
 }
 
-func deriveSessionHint(accountID string, body []byte) string {
+func deriveAffinitySessionKey(explicit string, body []byte) string {
+	if explicit = strings.TrimSpace(explicit); explicit != "" {
+		return explicit
+	}
+	return deriveSessionHint("", body)
+}
+
+func deriveSessionHint(_ string, body []byte) string {
 	if len(body) == 0 {
 		return ""
 	}
@@ -1367,8 +1415,6 @@ func deriveSessionHint(accountID string, body []byte) string {
 	}
 
 	h := sha256.New()
-	_, _ = h.Write([]byte(accountID))
-	_, _ = h.Write([]byte{0})
 	_, _ = h.Write([]byte(prefix(gjson.GetBytes(body, "instructions").String())))
 	_, _ = h.Write([]byte{0})
 	_, _ = h.Write([]byte(prefix(gjson.GetBytes(body, "input.0").Raw)))
