@@ -40,6 +40,37 @@ func TestSessionAffinityStoreEvictOnlyMatchingBinding(t *testing.T) {
 	}
 }
 
+func TestSessionAffinityStoreBindCleansExpiredEntries(t *testing.T) {
+	now := time.Date(2026, 5, 22, 0, 0, 0, 0, time.UTC)
+	store := newSessionAffinityStore(time.Minute)
+	store.Bind("session-expired", "account-a", now)
+
+	store.Bind("session-live", "account-b", now.Add(2*time.Minute))
+
+	if _, ok := store.entries["session-expired"]; ok {
+		t.Fatal("Bind() should opportunistically clear expired affinity")
+	}
+	if got, ok := store.Lookup("session-live", now.Add(2*time.Minute)); !ok || got != "account-b" {
+		t.Fatalf("live Lookup() after cleanup = (%q, %v), want account-b true", got, ok)
+	}
+}
+
+func TestSessionAffinityStoreBindCleanupIsBoundedByTTL(t *testing.T) {
+	now := time.Date(2026, 5, 22, 0, 0, 0, 0, time.UTC)
+	store := newSessionAffinityStore(time.Minute)
+	store.Bind("session-live", "account-a", now)
+	store.entries["session-expired"] = sessionAffinityEntry{
+		accountKey: "account-expired",
+		expiresAt:  now.Add(-time.Second),
+	}
+
+	store.Bind("session-next", "account-b", now.Add(30*time.Second))
+
+	if _, ok := store.entries["session-expired"]; !ok {
+		t.Fatal("Bind() should not sweep on every insert within cleanup interval")
+	}
+}
+
 func newSessionAffinityPolicyTestManager(t *testing.T) *Manager {
 	t.Helper()
 	return NewManager(t.TempDir(), nil, "", 3000, NewRoundRobinSelector(), false, &ManagerOptions{
@@ -119,5 +150,18 @@ func TestManagerPickSessionAccountEvictsModelBlockedBinding(t *testing.T) {
 	}
 	if _, ok := m.sessionAffinity.Lookup("session-a", time.Now()); ok {
 		t.Fatal("model-blocked bound account should be evicted")
+	}
+}
+
+func TestManagerLookupSnapshotAccountUsesCurrentIndexIdentity(t *testing.T) {
+	m := newSessionAffinityPolicyTestManager(t)
+	stale := addPolicyTestAccount(m, "stale-snapshot@example.com")
+
+	m.mu.Lock()
+	delete(m.accountIndex, stale.FilePath)
+	m.mu.Unlock()
+
+	if got := m.lookupSnapshotAccount(stale.FilePath); got != nil {
+		t.Fatalf("lookupSnapshotAccount() = %p, want nil for account missing from index", got)
 	}
 }

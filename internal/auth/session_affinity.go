@@ -12,9 +12,10 @@ type sessionAffinityEntry struct {
 }
 
 type sessionAffinityStore struct {
-	mu      sync.Mutex
-	ttl     time.Duration
-	entries map[string]sessionAffinityEntry
+	mu          sync.Mutex
+	ttl         time.Duration
+	entries     map[string]sessionAffinityEntry
+	lastCleanup time.Time
 }
 
 func newSessionAffinityStore(ttl time.Duration) *sessionAffinityStore {
@@ -46,8 +47,21 @@ func (s *sessionAffinityStore) Bind(sessionKey, accountKey string, now time.Time
 		return
 	}
 	s.mu.Lock()
+	s.cleanupExpiredLocked(now)
 	s.entries[sessionKey] = sessionAffinityEntry{accountKey: accountKey, expiresAt: now.Add(s.ttl)}
 	s.mu.Unlock()
+}
+
+func (s *sessionAffinityStore) cleanupExpiredLocked(now time.Time) {
+	if !s.lastCleanup.IsZero() && now.Sub(s.lastCleanup) < s.ttl {
+		return
+	}
+	for sessionKey, entry := range s.entries {
+		if !entry.expiresAt.After(now) {
+			delete(s.entries, sessionKey)
+		}
+	}
+	s.lastCleanup = now
 }
 
 func (s *sessionAffinityStore) EvictIfBound(sessionKey, accountKey string) {
@@ -96,14 +110,8 @@ func (m *Manager) lookupSnapshotAccount(accountKey string) *Account {
 	if m == nil || strings.TrimSpace(accountKey) == "" {
 		return nil
 	}
-	accountsPtr := m.accountsPtr.Load()
-	if accountsPtr == nil {
-		return nil
-	}
-	for _, acc := range *accountsPtr {
-		if acc != nil && acc.FilePath == accountKey {
-			return acc
-		}
-	}
-	return nil
+	m.mu.RLock()
+	acc := m.accountIndex[accountKey]
+	m.mu.RUnlock()
+	return acc
 }
