@@ -153,7 +153,30 @@ func TestManagerPickSessionAccountEvictsModelBlockedBinding(t *testing.T) {
 	}
 }
 
-func TestManagerLookupSnapshotAccountUsesCurrentIndexIdentity(t *testing.T) {
+func TestManagerPickSessionAccountHonorsFreeFallbackPoolSemantics(t *testing.T) {
+	resetFreeAccountPolicy(t)
+
+	m := newSessionAffinityPolicyTestManager(t)
+	m.selector = NewFillFirstSelector()
+	free := addPolicyTestAccount(m, "a-free-bound@example.com")
+	free.Token.PlanType = "free"
+	paid := addPolicyTestAccount(m, "b-paid-replacement@example.com")
+	paid.Token.PlanType = "plus"
+	m.BindSessionAccount("session-a", free)
+
+	picked, err := m.PickSessionAccount("session-a", "gpt-5", nil)
+	if err != nil {
+		t.Fatalf("PickSessionAccount() error = %v", err)
+	}
+	if picked != paid {
+		t.Fatalf("picked %s, want paid replacement while free is fallback-only", picked.GetEmail())
+	}
+	if _, ok := m.sessionAffinity.Lookup("session-a", time.Now()); ok {
+		t.Fatal("fallback-hidden free binding should be evicted")
+	}
+}
+
+func TestManagerLookupAvailableSessionAccountUsesCurrentIndexIdentity(t *testing.T) {
 	m := newSessionAffinityPolicyTestManager(t)
 	stale := addPolicyTestAccount(m, "stale-snapshot@example.com")
 
@@ -161,7 +184,7 @@ func TestManagerLookupSnapshotAccountUsesCurrentIndexIdentity(t *testing.T) {
 	delete(m.accountIndex, stale.FilePath)
 	m.mu.Unlock()
 
-	if got := m.lookupSnapshotAccount(stale.FilePath); got != nil {
-		t.Fatalf("lookupSnapshotAccount() = %p, want nil for account missing from index", got)
+	if got := m.lookupAvailableSessionAccount(stale.FilePath, "gpt-5"); got != nil {
+		t.Fatalf("lookupAvailableSessionAccount() = %p, want nil for account missing from index", got)
 	}
 }

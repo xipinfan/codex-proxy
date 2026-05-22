@@ -97,7 +97,7 @@ func (m *Manager) PickSessionAccount(sessionKey, model string, excluded map[stri
 			return m.PickExcluding(model, excluded)
 		}
 
-		if acc := m.lookupSnapshotAccount(accountKey); acc != nil && accountPickableAt(now.UnixMilli(), model, acc) {
+		if acc := m.lookupAvailableSessionAccount(accountKey, model); acc != nil {
 			return acc, nil
 		}
 		m.sessionAffinity.EvictIfBound(sessionKey, accountKey)
@@ -106,12 +106,25 @@ func (m *Manager) PickSessionAccount(sessionKey, model string, excluded map[stri
 	return m.PickExcluding(model, excluded)
 }
 
-func (m *Manager) lookupSnapshotAccount(accountKey string) *Account {
+func (m *Manager) lookupAvailableSessionAccount(accountKey, model string) *Account {
 	if m == nil || strings.TrimSpace(accountKey) == "" {
 		return nil
 	}
 	m.mu.RLock()
 	acc := m.accountIndex[accountKey]
+	var accounts []*Account
+	if acc != nil {
+		accounts = make([]*Account, len(m.accounts))
+		copy(accounts, m.accounts)
+	}
 	m.mu.RUnlock()
-	return acc
+	if acc == nil {
+		return nil
+	}
+	for _, available := range filterAvailable(model, accounts) {
+		if available == acc {
+			return acc
+		}
+	}
+	return nil
 }
