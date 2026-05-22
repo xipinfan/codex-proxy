@@ -247,6 +247,23 @@ func TestDeriveAffinitySessionKeyEmptyWithoutStableMaterial(t *testing.T) {
 	}
 }
 
+func TestAffinitySessionKeyLogLabel(t *testing.T) {
+	if got := affinitySessionKeyLogLabel(""); got != "" {
+		t.Fatalf("affinitySessionKeyLogLabel(empty) = %q, want empty", got)
+	}
+
+	got := affinitySessionKeyLogLabel("explicit-session-with-user-context")
+	if got == "" {
+		t.Fatal("affinitySessionKeyLogLabel() returned empty label")
+	}
+	if got == "explicit-session-with-user-context" {
+		t.Fatal("affinitySessionKeyLogLabel() should not expose the raw session key")
+	}
+	if got != affinitySessionKeyLogLabel("explicit-session-with-user-context") {
+		t.Fatal("affinitySessionKeyLogLabel() changed for the same session key")
+	}
+}
+
 func TestApplyCodexHeadersPrefersExplicitSessionID(t *testing.T) {
 	req, err := http.NewRequest(http.MethodPost, "https://example.com/responses", nil)
 	if err != nil {

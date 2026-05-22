@@ -394,8 +394,28 @@ func (e *Executor) sendWithRetry(ctx context.Context, rc RetryConfig, model stri
 	}
 
 	sessionKey := deriveAffinitySessionKey(rc.ExplicitSessionID, codexBody)
+	sessionLabel := affinitySessionKeyLogLabel(sessionKey)
+	if sessionKey != "" {
+		log.WithFields(log.Fields{
+			"session":  sessionLabel,
+			"explicit": strings.TrimSpace(rc.ExplicitSessionID) != "",
+			"model":    model,
+			"stream":   stream,
+		}).Debug("session_affinity_request")
+	} else if rc.PickSessionAccountFn != nil || rc.BindSessionAccountFn != nil || rc.EvictSessionAccountFn != nil {
+		log.WithFields(log.Fields{
+			"model":  model,
+			"stream": stream,
+			"reason": "no_stable_session_material",
+		}).Debug("session_affinity_disabled_for_request")
+	}
 	evict := func(acc *auth.Account) {
 		if sessionKey != "" && rc.EvictSessionAccountFn != nil && acc != nil {
+			log.WithFields(log.Fields{
+				"session": sessionLabel,
+				"account": acc.GetEmail(),
+				"model":   model,
+			}).Debug("session_affinity_retry_evict")
 			rc.EvictSessionAccountFn(sessionKey, acc)
 		}
 	}
@@ -534,6 +554,11 @@ func (e *Executor) sendWithRetry(ctx context.Context, rc RetryConfig, model stri
 
 	pickPrimary := func(model string, excluded map[string]bool) (*auth.Account, error) {
 		if sessionKey != "" && rc.PickSessionAccountFn != nil {
+			log.WithFields(log.Fields{
+				"session":        sessionLabel,
+				"model":          model,
+				"excluded_count": len(excluded),
+			}).Debug("session_affinity_pick_attempt")
 			return rc.PickSessionAccountFn(sessionKey, model, excluded)
 		}
 		return rc.PickFn(model, excluded)
@@ -1420,8 +1445,20 @@ func BindAcceptedCompactSessionAccount(rc RetryConfig, requestBody []byte, model
 func bindAcceptedSessionAccount(rc RetryConfig, codexBody []byte, account *auth.Account) {
 	sessionKey := deriveAffinitySessionKey(rc.ExplicitSessionID, codexBody)
 	if sessionKey != "" && rc.BindSessionAccountFn != nil && account != nil {
+		log.WithFields(log.Fields{
+			"session": affinitySessionKeyLogLabel(sessionKey),
+			"account": account.GetEmail(),
+		}).Debug("session_affinity_accepted_bind")
 		rc.BindSessionAccountFn(sessionKey, account)
 	}
+}
+
+func affinitySessionKeyLogLabel(sessionKey string) string {
+	if sessionKey = strings.TrimSpace(sessionKey); sessionKey == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(sessionKey))
+	return hex.EncodeToString(sum[:])[:12]
 }
 
 func deriveSessionHint(_ string, body []byte) string {

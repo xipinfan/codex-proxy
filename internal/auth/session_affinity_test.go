@@ -40,6 +40,23 @@ func TestSessionAffinityStoreEvictOnlyMatchingBinding(t *testing.T) {
 	}
 }
 
+func TestSessionAffinityKeyLogLabel(t *testing.T) {
+	if got := sessionAffinityKeyLogLabel(""); got != "" {
+		t.Fatalf("sessionAffinityKeyLogLabel(empty) = %q, want empty", got)
+	}
+
+	got := sessionAffinityKeyLogLabel("explicit-session-with-user-context")
+	if got == "" {
+		t.Fatal("sessionAffinityKeyLogLabel() returned empty label")
+	}
+	if got == "explicit-session-with-user-context" {
+		t.Fatal("sessionAffinityKeyLogLabel() should not expose the raw session key")
+	}
+	if got != sessionAffinityKeyLogLabel("explicit-session-with-user-context") {
+		t.Fatal("sessionAffinityKeyLogLabel() changed for the same session key")
+	}
+}
+
 func TestSessionAffinityStoreBindCleansExpiredEntries(t *testing.T) {
 	now := time.Date(2026, 5, 22, 0, 0, 0, 0, time.UTC)
 	store := newSessionAffinityStore(time.Minute)

@@ -403,6 +403,10 @@ func (h *ProxyHandler) buildRetryConfig() executor.RetryConfig {
 func (h *ProxyHandler) retryConfigForRequest(ctx *fasthttp.RequestCtx) executor.RetryConfig {
 	rc := h.buildRetryConfig()
 	rc.ExplicitSessionID = strings.TrimSpace(string(ctx.Request.Header.Peek("X-Session-Id")))
+	log.WithFields(log.Fields{
+		"path":                string(ctx.Path()),
+		"explicit_session_id": rc.ExplicitSessionID != "",
+	}).Debug("session_affinity_request_config")
 	rc.PickSessionAccountFn = h.manager.PickSessionAccount
 	rc.BindSessionAccountFn = h.manager.BindSessionAccount
 	rc.EvictSessionAccountFn = h.manager.EvictSessionAccount
