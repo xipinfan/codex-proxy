@@ -71,6 +71,7 @@
 | `enable-healthy-retry` | `true`        | 是否在末几次重试中优先「最近成功」账号。                       |
 | `empty-retry-max`      | `2`           | 非流式空结果等场景的额外换号次数。                          |
 | `selector`             | `round-robin` | `round-robin` | `quota-first`（优先剩余额度高）。    |
+| `session-affinity-ttl-sec` | `1800`    | 同一会话成功后优先复用同账号的进程内粘性时长（秒），用于提升对话 Prompt Cache 局部性；`0` 关闭。 |
 
 
 ## 模型后缀开关

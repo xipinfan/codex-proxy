@@ -123,6 +123,7 @@ type Config struct {
 	KeepaliveInterval       int      `yaml:"keepalive-interval"`
 	EmptyRetryMax           int      `yaml:"empty-retry-max"`
 	Selector                string   `yaml:"selector"`
+	SessionAffinityTTLSec   int      `yaml:"session-affinity-ttl-sec"`
 	FreeAccountRole         string   `yaml:"free-account-role"`
 	FreeAccountCutoff       int      `yaml:"free-account-cutoff"`
 	RefreshBatchSize        int      `yaml:"refresh-batch-size"`
@@ -230,6 +231,7 @@ func LoadConfig(path string) (*Config, error) {
 		KeepaliveInterval:                  60,
 		EmptyRetryMax:                      2,
 		Selector:                           "round-robin",
+		SessionAffinityTTLSec:              1800,
 		FreeAccountRole:                    "fallback",
 		FreeAccountCutoff:                  70,
 		RefreshBatchSize:                   0,

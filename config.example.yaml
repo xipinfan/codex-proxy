@@ -203,6 +203,9 @@ startup-async-load: true
 # 选号策略: round-robin | quota-first（每次选额度最高）
 # selector: "round-robin"
 
+# 同一会话成功后优先复用同账号的粘性时长（秒），提升 Prompt Cache 局部性；0 关闭
+# session-affinity-ttl-sec: 1800
+
 # free 账号策略：
 #   fallback（默认）：优先使用 paid/unknown，只有它们都不可用时才使用 free
 #   shared：free 与 paid/unknown 共同参与选号
