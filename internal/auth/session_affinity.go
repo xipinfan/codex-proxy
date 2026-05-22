@@ -60,3 +60,50 @@ func (s *sessionAffinityStore) EvictIfBound(sessionKey, accountKey string) {
 	}
 	s.mu.Unlock()
 }
+
+func (m *Manager) BindSessionAccount(sessionKey string, acc *Account) {
+	if m == nil || acc == nil {
+		return
+	}
+	m.sessionAffinity.Bind(sessionKey, acc.FilePath, time.Now())
+}
+
+func (m *Manager) EvictSessionAccount(sessionKey string, acc *Account) {
+	if m == nil || acc == nil {
+		return
+	}
+	m.sessionAffinity.EvictIfBound(sessionKey, acc.FilePath)
+}
+
+func (m *Manager) PickSessionAccount(sessionKey, model string, excluded map[string]bool) (*Account, error) {
+	now := time.Now()
+	if accountKey, ok := m.sessionAffinity.Lookup(sessionKey, now); ok {
+		if excluded != nil && excluded[accountKey] {
+			m.sessionAffinity.EvictIfBound(sessionKey, accountKey)
+			return m.PickExcluding(model, excluded)
+		}
+
+		if acc := m.lookupSnapshotAccount(accountKey); acc != nil && accountPickableAt(now.UnixMilli(), model, acc) {
+			return acc, nil
+		}
+		m.sessionAffinity.EvictIfBound(sessionKey, accountKey)
+	}
+
+	return m.PickExcluding(model, excluded)
+}
+
+func (m *Manager) lookupSnapshotAccount(accountKey string) *Account {
+	if m == nil || strings.TrimSpace(accountKey) == "" {
+		return nil
+	}
+	accountsPtr := m.accountsPtr.Load()
+	if accountsPtr == nil {
+		return nil
+	}
+	for _, acc := range *accountsPtr {
+		if acc != nil && acc.FilePath == accountKey {
+			return acc
+		}
+	}
+	return nil
+}

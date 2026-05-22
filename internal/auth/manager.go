@@ -41,6 +41,7 @@ type ManagerOptions struct {
 	SaveWorkers             int /* 异步写入协程数 */
 	Cooldown401Sec          int /* 401 后冷却（秒） */
 	Cooldown429Sec          int /* 429 后冷却（秒） */
+	SessionAffinityTTL      time.Duration
 	RefreshSingleTimeoutSec int /* 后台 OAuth 刷新单次超时（秒），不影响 Codex 对话 SSE */
 	RefreshBatchSize        int /* 刷新批大小，0=不分批；>0 每批完成后再启下一批以控内存 */
 	/* RefreshHTTP429Action 未在 refresh-http-status-policy 中配置 429 时的默认 final（phase=none） */
@@ -97,6 +98,7 @@ type Manager struct {
 	saveQueue               chan *Account /* 异步磁盘写入队列 */
 	usagePersistSem         chan struct{}
 	stopCh                  chan struct{}
+	sessionAffinity         *sessionAffinityStore
 	importMu                sync.Mutex /* 防止并发导入账号文件到数据库 */
 	refreshHTTPPolicy       map[int]httpStatusPolicy
 	quotaHTTPPolicy         map[int]httpStatusPolicy
@@ -125,6 +127,10 @@ func NewManager(authDir string, db *sql.DB, proxyURL string, refreshInterval int
 	if selector == nil {
 		selector = NewRoundRobinSelector()
 	}
+	sessionAffinityTTL := time.Duration(0)
+	if opts != nil {
+		sessionAffinityTTL = opts.SessionAffinityTTL
+	}
 	m := &Manager{
 		db:                      db,
 		accounts:                make([]*Account, 0, 1024),
@@ -142,6 +148,7 @@ func NewManager(authDir string, db *sql.DB, proxyURL string, refreshInterval int
 		saveQueue:               make(chan *Account, 4096),
 		usagePersistSem:         make(chan struct{}, 256),
 		stopCh:                  make(chan struct{}),
+		sessionAffinity:         newSessionAffinityStore(sessionAffinityTTL),
 	}
 	if opts != nil {
 		m.dbDialect = opts.DBDialect
