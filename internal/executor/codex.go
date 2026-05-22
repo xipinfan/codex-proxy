@@ -394,11 +394,6 @@ func (e *Executor) sendWithRetry(ctx context.Context, rc RetryConfig, model stri
 	}
 
 	sessionKey := deriveAffinitySessionKey(rc.ExplicitSessionID, codexBody)
-	bindSuccess := func(acc *auth.Account) {
-		if sessionKey != "" && rc.BindSessionAccountFn != nil && acc != nil {
-			rc.BindSessionAccountFn(sessionKey, acc)
-		}
-	}
 	evict := func(acc *auth.Account) {
 		if sessionKey != "" && rc.EvictSessionAccountFn != nil && acc != nil {
 			rc.EvictSessionAccountFn(sessionKey, acc)
@@ -458,7 +453,6 @@ func (e *Executor) sendWithRetry(ctx context.Context, rc RetryConfig, model stri
 				if !rc.SkipModelAccessClearOnHTTP2xx {
 					account.ClearModelAccessFailure(model)
 				}
-				bindSuccess(account)
 				log.Debugf("send stage model=%s account=%s attempt=%d/%d pick=%v build=%v upstream_wait=%v total=%v status=%d", model, account.GetEmail(), attemptOneBased, maxLabel, pickDur, buildDur, doDur, time.Since(startAttempt), httpResp.StatusCode)
 				log.Debugf("send attempt success status=%d account=%s elapsed=%v", httpResp.StatusCode, account.GetEmail(), time.Since(startAttempt).Round(time.Millisecond))
 				return httpResp, nil
@@ -629,7 +623,6 @@ func (e *Executor) sendWithRetry(ctx context.Context, rc RetryConfig, model stri
 		log.Infof("429 并发重试启动: model=%s timeout=%v", model, rc.ConcurrentRetry429Timeout)
 		cResp, cAcc, cAccounts, cErr := e.concurrentRetryAfter429WithHeaders(ctx, rc, model, apiURL, encoded.Body, codexBody, stream, excluded, encoded.Headers)
 		if cErr == nil && cResp != nil {
-			bindSuccess(cAcc)
 			return cResp, cAcc, maxAttempts + 1, nil
 		}
 		if cErr != nil {
@@ -844,7 +837,11 @@ func (e *Executor) ExecuteStream(ctx context.Context, rc RetryConfig, requestBod
 			flusher.Flush()
 		}
 	}
-	return s.PumpChatCompletion(writer, flush)
+	if err := s.PumpChatCompletion(writer, flush); err != nil {
+		return err
+	}
+	BindAcceptedResponsesSessionAccount(rc, requestBody, model, s.Account())
+	return nil
 }
 
 /**
@@ -917,6 +914,7 @@ func (e *Executor) ExecuteNonStream(ctx context.Context, rc RetryConfig, request
 		}
 
 		if gotValid && len(result) > 0 {
+			bindAcceptedSessionAccount(rc, codexBody, account)
 			account.RecordSuccess()
 			log.Infof("req summary nonstream model=%s account=%s attempts=%d convert=%v upstream=%v total=%v", baseModel, account.GetEmail(), attempts, convertDur, sendDur, time.Since(startTotal))
 			return result, nil
@@ -966,7 +964,11 @@ func (e *Executor) ExecuteResponsesStream(ctx context.Context, rc RetryConfig, r
 			flusher.Flush()
 		}
 	}
-	return s.PumpRawSSE(writer, flush)
+	if err := s.PumpRawSSE(writer, flush); err != nil {
+		return err
+	}
+	BindAcceptedResponsesSessionAccount(rc, requestBody, model, s.Account())
+	return nil
 }
 
 /**
@@ -1022,6 +1024,7 @@ func (e *Executor) ExecuteResponsesNonStream(ctx context.Context, rc RetryConfig
 			if usage.FoundUsage && (usage.InputTokens > 0 || usage.OutputTokens > 0) {
 				account.RecordUsage(usage.InputTokens, usage.OutputTokens, usage.TotalTokens)
 			}
+			bindAcceptedSessionAccount(rc, codexBody, account)
 			account.RecordSuccess()
 			log.Infof("req summary responses-nonstream model=%s account=%s attempts=%d convert=%v upstream=%v total=%v", baseModel, account.GetEmail(), attempts, convertDur, sendDur, time.Since(startTotal))
 			return resp, nil
@@ -1206,6 +1209,7 @@ func (e *Executor) ExecuteResponsesCompactStream(ctx context.Context, rc RetryCo
 	if usage := compact.Usage(); usage.FoundUsage && (usage.InputTokens > 0 || usage.OutputTokens > 0) {
 		compact.Account.RecordUsage(usage.InputTokens, usage.OutputTokens, usage.TotalTokens)
 	}
+	BindAcceptedCompactSessionAccount(rc, requestBody, model, compact.Account)
 	compact.Account.RecordSuccess()
 	log.Infof("req summary responses-compact-stream model=%s account=%s attempts=%d convert=%v upstream=%v total=%v", compact.BaseModel, compact.Account.GetEmail(), compact.Attempts, compact.ConvertDur, compact.SendDur, time.Since(startTotal))
 	return nil
@@ -1255,6 +1259,7 @@ func (e *Executor) ExecuteResponsesCompactNonStream(ctx context.Context, rc Retr
 	if usage.FoundUsage && (usage.InputTokens > 0 || usage.OutputTokens > 0) {
 		account.RecordUsage(usage.InputTokens, usage.OutputTokens, usage.TotalTokens)
 	}
+	bindAcceptedSessionAccount(rc, codexBody, account)
 	account.RecordSuccess()
 	log.Infof("req summary responses-compact-nonstream model=%s account=%s attempts=%d convert=%v upstream=%v total=%v", baseModel, account.GetEmail(), attempts, convertDur, sendDur, time.Since(startTotal))
 	return data, nil
@@ -1402,6 +1407,23 @@ func deriveAffinitySessionKey(explicit string, body []byte) string {
 	return deriveSessionHint("", body)
 }
 
+func BindAcceptedResponsesSessionAccount(rc RetryConfig, requestBody []byte, model string, account *auth.Account) {
+	body, baseModel, isImage := thinking.ApplyThinking(requestBody, model)
+	bindAcceptedSessionAccount(rc, translator.ConvertOpenAIRequestToCodex(baseModel, body, true, isImage), account)
+}
+
+func BindAcceptedCompactSessionAccount(rc RetryConfig, requestBody []byte, model string, account *auth.Account) {
+	body, baseModel, _ := thinking.ApplyThinking(requestBody, model)
+	bindAcceptedSessionAccount(rc, cleanCompactBody(body, baseModel), account)
+}
+
+func bindAcceptedSessionAccount(rc RetryConfig, codexBody []byte, account *auth.Account) {
+	sessionKey := deriveAffinitySessionKey(rc.ExplicitSessionID, codexBody)
+	if sessionKey != "" && rc.BindSessionAccountFn != nil && account != nil {
+		rc.BindSessionAccountFn(sessionKey, account)
+	}
+}
+
 func deriveSessionHint(_ string, body []byte) string {
 	if len(body) == 0 {
 		return ""
@@ -1414,10 +1436,16 @@ func deriveSessionHint(_ string, body []byte) string {
 		return s
 	}
 
+	instructions := prefix(gjson.GetBytes(body, "instructions").String())
+	input := prefix(gjson.GetBytes(body, "input.0").Raw)
+	if instructions == "" && input == "" {
+		return ""
+	}
+
 	h := sha256.New()
-	_, _ = h.Write([]byte(prefix(gjson.GetBytes(body, "instructions").String())))
+	_, _ = h.Write([]byte(instructions))
 	_, _ = h.Write([]byte{0})
-	_, _ = h.Write([]byte(prefix(gjson.GetBytes(body, "input.0").Raw)))
+	_, _ = h.Write([]byte(input))
 	return hex.EncodeToString(h.Sum(nil))[:32]
 }
 

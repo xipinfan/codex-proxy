@@ -241,6 +241,12 @@ func TestDeriveAffinitySessionKeyPrefersExplicitHeader(t *testing.T) {
 	}
 }
 
+func TestDeriveAffinitySessionKeyEmptyWithoutStableMaterial(t *testing.T) {
+	if got := deriveAffinitySessionKey("", []byte(`{"model":"gpt-5.5"}`)); got != "" {
+		t.Fatalf("deriveAffinitySessionKey() = %q, want empty without instructions or input prefix", got)
+	}
+}
+
 func TestApplyCodexHeadersPrefersExplicitSessionID(t *testing.T) {
 	req, err := http.NewRequest(http.MethodPost, "https://example.com/responses", nil)
 	if err != nil {
@@ -332,7 +338,7 @@ func TestSendWithRetryUsesSessionAwarePick(t *testing.T) {
 	}
 }
 
-func TestSendWithRetryBindsSuccessfulSessionAccount(t *testing.T) {
+func TestSendWithRetryDoesNotBindBeforeAcceptedResponse(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"ok":true}`))
@@ -371,11 +377,90 @@ func TestSendWithRetryBindsSuccessfulSessionAccount(t *testing.T) {
 	if used != acc {
 		t.Fatalf("used account = %v, want success account", used)
 	}
+	if boundKey != "" {
+		t.Fatalf("bound sessionKey = %q, want no transport-boundary binding", boundKey)
+	}
+	if boundAccount != nil {
+		t.Fatalf("bound account = %v, want no transport-boundary binding", boundAccount)
+	}
+}
+
+func TestExecuteResponsesNonStreamBindsAcceptedSessionAccount(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"object":"response","id":"resp_accepted","output":[{"type":"message","content":[{"type":"output_text","text":"hello"}]}]}`))
+	}))
+	defer upstream.Close()
+
+	acc := &auth.Account{
+		FilePath: "accepted.json",
+		Token: auth.TokenData{
+			Email:       "accepted@example.com",
+			AccessToken: "access-token",
+		},
+		Status: auth.StatusActive,
+	}
+	acc.SetActive()
+
+	executor := NewExecutor(upstream.URL, "", HTTPPoolConfig{})
+	var boundKey string
+	var boundAccount *auth.Account
+	rc := RetryConfig{
+		ExplicitSessionID: "session-a",
+		PickFn: func(model string, excluded map[string]bool) (*auth.Account, error) {
+			return acc, nil
+		},
+		BindSessionAccountFn: func(sessionKey string, acc *auth.Account) {
+			boundKey = sessionKey
+			boundAccount = acc
+		},
+	}
+
+	if _, err := executor.ExecuteResponsesNonStream(context.Background(), rc, []byte(`{"model":"gpt-5.5","input":"hello"}`), "gpt-5.5"); err != nil {
+		t.Fatalf("ExecuteResponsesNonStream() error = %v", err)
+	}
 	if boundKey != "session-a" {
 		t.Fatalf("bound sessionKey = %q, want session-a", boundKey)
 	}
 	if boundAccount != acc {
-		t.Fatalf("bound account = %v, want success account", boundAccount)
+		t.Fatalf("bound account = %v, want accepted account", boundAccount)
+	}
+}
+
+func TestExecuteResponsesNonStreamDoesNotBindRejected2xxResponse(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"type":"response.created","response":{"id":"resp_rejected"}}`))
+	}))
+	defer upstream.Close()
+
+	acc := &auth.Account{
+		FilePath: "rejected.json",
+		Token: auth.TokenData{
+			Email:       "rejected@example.com",
+			AccessToken: "access-token",
+		},
+		Status: auth.StatusActive,
+	}
+	acc.SetActive()
+
+	executor := NewExecutor(upstream.URL, "", HTTPPoolConfig{})
+	binds := 0
+	rc := RetryConfig{
+		ExplicitSessionID: "session-a",
+		PickFn: func(model string, excluded map[string]bool) (*auth.Account, error) {
+			return acc, nil
+		},
+		BindSessionAccountFn: func(sessionKey string, acc *auth.Account) {
+			binds++
+		},
+	}
+
+	if _, err := executor.ExecuteResponsesNonStream(context.Background(), rc, []byte(`{"model":"gpt-5.5","input":"hello"}`), "gpt-5.5"); err == nil {
+		t.Fatal("ExecuteResponsesNonStream() should reject a 2xx response without a completed response")
+	}
+	if binds != 0 {
+		t.Fatalf("BindSessionAccountFn called %d times, want 0 for rejected response", binds)
 	}
 }
 
@@ -415,8 +500,6 @@ func TestSendWithRetryEvictsFailedBoundSessionAccountBeforeReplacement(t *testin
 	executor := &Executor{httpClient: upstream.Client()}
 	var evictedKey string
 	var evictedAccount *auth.Account
-	var boundKey string
-	var boundAccount *auth.Account
 	rc := RetryConfig{
 		MaxRetry:          1,
 		ExplicitSessionID: "session-a",
@@ -425,10 +508,6 @@ func TestSendWithRetryEvictsFailedBoundSessionAccountBeforeReplacement(t *testin
 				return acc1, nil
 			}
 			return acc2, nil
-		},
-		BindSessionAccountFn: func(sessionKey string, acc *auth.Account) {
-			boundKey = sessionKey
-			boundAccount = acc
 		},
 		EvictSessionAccountFn: func(sessionKey string, acc *auth.Account) {
 			evictedKey = sessionKey
@@ -452,12 +531,6 @@ func TestSendWithRetryEvictsFailedBoundSessionAccountBeforeReplacement(t *testin
 	}
 	if evictedAccount != acc1 {
 		t.Fatalf("evicted account = %v, want first account", evictedAccount)
-	}
-	if boundKey != "session-a" {
-		t.Fatalf("bound sessionKey = %q, want session-a", boundKey)
-	}
-	if boundAccount != acc2 {
-		t.Fatalf("bound account = %v, want replacement account", boundAccount)
 	}
 }
 

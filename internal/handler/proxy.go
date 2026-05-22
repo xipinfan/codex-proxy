@@ -688,7 +688,11 @@ func (h *ProxyHandler) handleChatCompletions(ctx *fasthttp.RequestCtx) {
 			sw := newStreamBufWriter(w)
 			bridges := executor.CodexStreamOpenBridgeMax(h.maxRetry)
 			execErr := h.executor.RunCodexStreamWithOpenBridges(context.Background(), rc, body, model, sw, flush, bridges, func(s *executor.CodexResponsesStream, w2 io.Writer, fl func()) error {
-				return s.PumpChatCompletion(w2, fl)
+				if err := s.PumpChatCompletion(w2, fl); err != nil {
+					return err
+				}
+				executor.BindAcceptedResponsesSessionAccount(rc, body, model, s.Account())
+				return nil
 			})
 			if execErr != nil {
 				log.Errorf("chat stream: %v", execErr)
@@ -1029,7 +1033,11 @@ func (h *ProxyHandler) handleResponses(ctx *fasthttp.RequestCtx) {
 			sw := newStreamBufWriter(w)
 			bridges := executor.CodexStreamOpenBridgeMax(h.maxRetry)
 			execErr := h.executor.RunCodexStreamWithOpenBridges(context.Background(), rc, body, model, sw, flush, bridges, func(s *executor.CodexResponsesStream, w2 io.Writer, fl func()) error {
-				return s.PumpRawSSE(w2, fl)
+				if err := s.PumpRawSSE(w2, fl); err != nil {
+					return err
+				}
+				executor.BindAcceptedResponsesSessionAccount(rc, body, model, s.Account())
+				return nil
 			})
 			if execErr != nil {
 				log.Errorf("responses stream: %v", execErr)
@@ -1198,7 +1206,11 @@ func (h *ProxyHandler) forwardResponsesSSEAsWSSession(ctx context.Context, sess 
 	return h.executor.RunCodexStreamWithOpenBridges(ctx, rc, requestBody, model,
 		&wsNopWriter{}, func() {}, bridges,
 		func(s *executor.CodexResponsesStream, w io.Writer, flush func()) error {
-			return h.pumpSSEToWSSession(s, sess, w, ctx)
+			if err := h.pumpSSEToWSSession(s, sess, w, ctx); err != nil {
+				return err
+			}
+			executor.BindAcceptedResponsesSessionAccount(rc, requestBody, model, s.Account())
+			return nil
 		})
 }
 
@@ -1354,6 +1366,7 @@ func (h *ProxyHandler) handleResponsesCompact(ctx *fasthttp.RequestCtx) {
 				log.Errorf("compact stream pump: %v", execErr)
 				return
 			}
+			executor.BindAcceptedCompactSessionAccount(rc, body, model, compact.Account)
 			if usage := compact.Usage(); usage.FoundUsage && (usage.InputTokens > 0 || usage.OutputTokens > 0) {
 				compact.Account.RecordUsage(usage.InputTokens, usage.OutputTokens, usage.TotalTokens)
 			}
