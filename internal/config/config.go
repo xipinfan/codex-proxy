@@ -23,6 +23,7 @@ const DefaultDisabledRecoveryIntervalSec = 3600
 const (
 	DefaultListenMaxRequestBodyBytes = 128 * 1024 * 1024
 	MinListenMaxRequestBodyBytes     = 4 * 1024 * 1024
+	MaxSessionAffinityTTLSec         = 86400
 
 	DefaultUpstreamRequestCompression         = "auto"
 	DefaultUpstreamRequestCompressionMinBytes = 1024 * 1024
@@ -446,6 +447,12 @@ func (c *Config) Sanitize() {
 	}
 	if c.QuotaCheckConcurrency == 0 {
 		c.QuotaCheckConcurrency = c.RefreshConcurrency
+	}
+	if c.SessionAffinityTTLSec < 0 {
+		c.SessionAffinityTTLSec = 0
+	}
+	if c.SessionAffinityTTLSec > MaxSessionAffinityTTLSec {
+		c.SessionAffinityTTLSec = MaxSessionAffinityTTLSec
 	}
 	if c.KeepaliveInterval <= 0 {
 		c.KeepaliveInterval = 60

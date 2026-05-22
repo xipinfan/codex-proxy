@@ -112,6 +112,25 @@ func TestSanitizeNormalizesFreeAccountPolicy(t *testing.T) {
 	}
 }
 
+func TestSanitizeBoundsSessionAffinityTTL(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		ttl  int
+		want int
+	}{
+		{name: "negative", ttl: -1, want: 0},
+		{name: "too high", ttl: MaxSessionAffinityTTLSec + 1, want: MaxSessionAffinityTTLSec},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &Config{SessionAffinityTTLSec: tc.ttl}
+			cfg.Sanitize()
+			if cfg.SessionAffinityTTLSec != tc.want {
+				t.Fatalf("SessionAffinityTTLSec = %d, want %d", cfg.SessionAffinityTTLSec, tc.want)
+			}
+		})
+	}
+}
+
 func TestLoadConfigDefaultsLogCacheMetricsAndAllowsDisablingIt(t *testing.T) {
 	dir := t.TempDir()
 	defaultPath := filepath.Join(dir, "default.yaml")
