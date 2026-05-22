@@ -2,6 +2,7 @@
 FROM node:22-alpine AS web-builder
 
 WORKDIR /src
+COPY package.json ./
 COPY web/package.json web/pnpm-lock.yaml ./web/
 RUN corepack enable && corepack pnpm --dir web install --frozen-lockfile
 COPY web ./web
