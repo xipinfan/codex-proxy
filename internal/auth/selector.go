@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"runtime"
 	"sort"
+	"strings"
 	"sync/atomic"
 	"time"
 )
@@ -25,6 +26,53 @@ const cacheRebuildSpinMax = 4096
 
 /* maxPickProbePerPass 单次从 RR 缓存切片上环形探测「仍可选」账号的步数上限 */
 const maxPickProbePerPass = 128
+
+const (
+	freeAccountRoleShared   = "shared"
+	freeAccountRoleFallback = "fallback"
+	freeAccountRoleDisabled = "disabled"
+)
+
+var (
+	freeAccountCutoff atomic.Int64
+	freeAccountRole   atomic.Pointer[string]
+)
+
+func init() {
+	SetFreeAccountPolicy(70, freeAccountRoleFallback)
+}
+
+func SetFreeAccountPolicy(cutoff int, role string) {
+	if cutoff < 0 {
+		cutoff = 0
+	}
+	if cutoff > 100 {
+		cutoff = 100
+	}
+	normalizedRole := normalizeFreeAccountRole(role)
+	freeAccountCutoff.Store(int64(cutoff))
+	freeAccountRole.Store(&normalizedRole)
+}
+
+func normalizeFreeAccountRole(role string) string {
+	switch strings.ToLower(strings.TrimSpace(role)) {
+	case freeAccountRoleShared:
+		return freeAccountRoleShared
+	case freeAccountRoleDisabled:
+		return freeAccountRoleDisabled
+	case freeAccountRoleFallback:
+		return freeAccountRoleFallback
+	default:
+		return freeAccountRoleFallback
+	}
+}
+
+func currentFreeAccountRole() string {
+	if role := freeAccountRole.Load(); role != nil {
+		return *role
+	}
+	return freeAccountRoleFallback
+}
 
 /**
  * Selector 定义账号选择器接口
@@ -250,13 +298,19 @@ func (s *FillFirstSelector) Pick(model string, accounts []*Account) (*Account, e
 }
 
 /**
- * sortByUsedPercent 按额度使用率升序排序（剩余额度最多的优先）
+ * sortByTierThenUsedPercent 按账号层级与额度使用率排序
+ * tier: paid -> unknown -> free，避免误伤未填 plan 的付费账号
  * used_percent: 0=最空闲, 100=已满, -1=未知（排最后）
  * 同使用率时按文件路径保持稳定顺序
  * @param accounts - 待排序的账号列表（原地排序）
  */
-func sortByUsedPercent(accounts []*Account) {
-	sort.Slice(accounts, func(i, j int) bool {
+func sortByTierThenUsedPercent(accounts []*Account) {
+	sort.SliceStable(accounts, func(i, j int) bool {
+		ti := tierRank(accounts[i].PlanTier())
+		tj := tierRank(accounts[j].PlanTier())
+		if ti != tj {
+			return ti < tj
+		}
 		pi := accounts[i].GetUsedPercent()
 		pj := accounts[j].GetUsedPercent()
 		if pi < 0 && pj >= 0 {
@@ -271,6 +325,8 @@ func sortByUsedPercent(accounts []*Account) {
 		return accounts[i].FilePath < accounts[j].FilePath
 	})
 }
+
+var sortByUsedPercent = sortByTierThenUsedPercent
 
 /**
  * accountPickableAt 与 filterAvailable 单账号语义一致，供 RR 缓存出号前二次校验
@@ -287,6 +343,15 @@ func accountPickableAt(nowMs int64, model string, acc *Account) bool {
 	if model != "" && acc.IsModelBlocked(model, time.UnixMilli(nowMs)) {
 		return false
 	}
+	if acc.PlanTier() == PlanTierFree {
+		switch currentFreeAccountRole() {
+		case freeAccountRoleDisabled:
+			return false
+		}
+		if cutoff := freeAccountCutoff.Load(); cutoff > 0 && acc.GetUsedPercent() >= float64(cutoff) {
+			return false
+		}
+	}
 	return true
 }
 
@@ -298,6 +363,26 @@ func accountPickableAt(nowMs int64, model string, acc *Account) bool {
  */
 func filterAvailable(model string, accounts []*Account) []*Account {
 	nowMs := time.Now().UnixMilli()
+	if currentFreeAccountRole() == freeAccountRoleFallback {
+		primary := make([]*Account, 0, len(accounts))
+		secondary := make([]*Account, 0, len(accounts))
+
+		for _, acc := range accounts {
+			if !accountPickableAt(nowMs, model, acc) {
+				continue
+			}
+			if acc.PlanTier() == PlanTierFree {
+				secondary = append(secondary, acc)
+				continue
+			}
+			primary = append(primary, acc)
+		}
+		if len(primary) > 0 {
+			return primary
+		}
+		return secondary
+	}
+
 	available := make([]*Account, 0, len(accounts))
 
 	for _, acc := range accounts {

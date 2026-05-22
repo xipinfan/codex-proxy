@@ -1125,16 +1125,13 @@ func (m *Manager) PickExcluding(model string, excluded map[string]bool) (*Accoun
  */
 func (m *Manager) PickRecentlySuccessful(model string, excluded map[string]bool) (*Account, error) {
 	allAccounts := *m.accountsPtr.Load()
-	nowMs := time.Now().UnixMilli()
+	available := filterAvailable(model, allAccounts)
 	/* 按 lastSuccessUnixMs 线性扫描，等价于原 sort 后取最近，避免 O(N log N) */
 	var bestAll *Account
 	var bestAllMs int64 = -1
 	var bestOpen *Account
 	var bestOpenMs int64 = -1
-	for _, acc := range allAccounts {
-		if !accountPickableAt(nowMs, model, acc) {
-			continue
-		}
+	for _, acc := range available {
 		ms := acc.lastSuccessUnixMs.Load()
 		if ms <= 0 {
 			continue
@@ -1154,10 +1151,7 @@ func (m *Manager) PickRecentlySuccessful(model string, excluded map[string]bool)
 	}
 
 	if bestAll == nil {
-		for _, acc := range allAccounts {
-			if !accountPickableAt(nowMs, model, acc) {
-				continue
-			}
+		for _, acc := range available {
 			return acc, nil
 		}
 		return nil, fmt.Errorf("没有可用账号")
@@ -1170,14 +1164,11 @@ func (m *Manager) PickRecentlySuccessful(model string, excluded map[string]bool)
 
 func (m *Manager) PickRecentlySuccessfulOnly(model string, excluded map[string]bool) (*Account, error) {
 	allAccounts := *m.accountsPtr.Load()
-	nowMs := time.Now().UnixMilli()
+	available := filterAvailable(model, allAccounts)
 	var best *Account
 	var bestMs int64 = -1
-	for _, acc := range allAccounts {
+	for _, acc := range available {
 		if excluded != nil && excluded[acc.FilePath] {
-			continue
-		}
-		if !accountPickableAt(nowMs, model, acc) {
 			continue
 		}
 		ms := acc.lastSuccessUnixMs.Load()

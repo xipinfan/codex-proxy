@@ -61,6 +61,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("加载配置失败: %v", err)
 	}
+	auth.SetFreeAccountPolicy(cfg.FreeAccountCutoff, cfg.FreeAccountRole)
 
 	/* 处理子命令 */
 	args := flag.Args()

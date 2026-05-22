@@ -157,6 +157,12 @@ type modelBlockState struct {
 	blockedUntil time.Time
 }
 
+const (
+	PlanTierPaid    = "paid"
+	PlanTierFree    = "free"
+	PlanTierUnknown = "unknown"
+)
+
 type AccountAvailability struct {
 	Status              string
 	StoredStatus        string
@@ -502,6 +508,39 @@ func (a *Account) GetEmail() string {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	return a.Token.Email
+}
+
+func (a *Account) PlanType() string {
+	if a == nil {
+		return ""
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return strings.ToLower(strings.TrimSpace(a.Token.PlanType))
+}
+
+func (a *Account) PlanTier() string {
+	switch a.PlanType() {
+	case "":
+		return PlanTierUnknown
+	case PlanTierFree:
+		return PlanTierFree
+	default:
+		return PlanTierPaid
+	}
+}
+
+func tierRank(tier string) int {
+	switch tier {
+	case PlanTierPaid:
+		return 0
+	case PlanTierUnknown:
+		return 1
+	case PlanTierFree:
+		return 2
+	default:
+		return 1
+	}
 }
 
 /**

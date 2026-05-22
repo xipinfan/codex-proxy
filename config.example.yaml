@@ -202,6 +202,14 @@ startup-async-load: true
 # 选号策略: round-robin | quota-first（每次选额度最高）
 # selector: "round-robin"
 
+# free 账号策略：
+#   fallback（默认）：优先使用 paid/unknown，只有它们都不可用时才使用 free
+#   shared：free 与 paid/unknown 共同参与选号
+#   disabled：完全不使用 free
+# free-account-role: "fallback"
+# free 账号 used_percent 达到该阈值时从可用池下场；0 表示关闭 cutoff（默认 70，范围 0..100）
+# free-account-cutoff: 70
+
 # 刷新批大小（0=不分批）；>0 时每批完成后再启下一批，降低大账号数时的内存
 # refresh-batch-size: 0
 

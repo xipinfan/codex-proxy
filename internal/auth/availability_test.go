@@ -121,3 +121,153 @@ func TestPickRecentlySuccessfulUsesExpiredCooldownAccount(t *testing.T) {
 		t.Fatalf("expected picked account %p, got %p", acc, picked)
 	}
 }
+
+func selectorTestAccount(path, plan string, usedPercent float64) *Account {
+	acc := &Account{
+		FilePath: path,
+		Token: TokenData{
+			PlanType: plan,
+		},
+		Status: StatusActive,
+	}
+	acc.atomicStatus.Store(int32(StatusActive))
+	acc.atomicUsedPct.Store(int64(usedPercent * 100))
+	return acc
+}
+
+func resetFreeAccountPolicy(t *testing.T) {
+	t.Helper()
+	SetFreeAccountPolicy(70, "fallback")
+	t.Cleanup(func() {
+		SetFreeAccountPolicy(70, "fallback")
+	})
+}
+
+func TestSortByTierThenUsedPercentPrefersPaidThenUnknownThenFree(t *testing.T) {
+	paid := selectorTestAccount("paid.json", "pro", 90)
+	unknown := selectorTestAccount("unknown.json", "", 10)
+	free := selectorTestAccount("free.json", "free", 1)
+	accounts := []*Account{free, unknown, paid}
+
+	sortByTierThenUsedPercent(accounts)
+
+	want := []*Account{paid, unknown, free}
+	for i, acc := range want {
+		if accounts[i] != acc {
+			t.Fatalf("accounts[%d] = %s, want %s", i, accounts[i].FilePath, acc.FilePath)
+		}
+	}
+}
+
+func TestFilterAvailableDropsFreeAccountAtCutoff(t *testing.T) {
+	resetFreeAccountPolicy(t)
+	SetFreeAccountPolicy(70, "shared")
+
+	belowCutoff := selectorTestAccount("below.json", "free", 69)
+	atCutoff := selectorTestAccount("at.json", "free", 70)
+
+	got := filterAvailable("gpt-5", []*Account{belowCutoff, atCutoff})
+	if len(got) != 1 || got[0] != belowCutoff {
+		t.Fatalf("filterAvailable() = %#v, want only free account below cutoff", got)
+	}
+}
+
+func TestFilterAvailableKeepsFreeAccountWhenCutoffDisabled(t *testing.T) {
+	resetFreeAccountPolicy(t)
+	SetFreeAccountPolicy(0, "shared")
+
+	full := selectorTestAccount("full.json", "free", 100)
+	got := filterAvailable("gpt-5", []*Account{full})
+	if len(got) != 1 || got[0] != full {
+		t.Fatalf("filterAvailable() = %#v, want free account when cutoff is disabled", got)
+	}
+}
+
+func TestFallbackFilterHidesFreeWhilePrimaryTierAvailable(t *testing.T) {
+	resetFreeAccountPolicy(t)
+
+	paid := selectorTestAccount("paid.json", "plus", 60)
+	unknown := selectorTestAccount("unknown.json", "", 60)
+	free := selectorTestAccount("free.json", "free", 60)
+
+	got := filterAvailable("gpt-5", []*Account{free, unknown, paid})
+	if len(got) != 2 || got[0] != unknown || got[1] != paid {
+		t.Fatalf("filterAvailable() = %#v, want paid and unknown primary tier only", got)
+	}
+}
+
+func TestFallbackFilterRevealsFreeWhenPaidUnavailable(t *testing.T) {
+	resetFreeAccountPolicy(t)
+
+	disabled := selectorTestAccount("disabled.json", "team", 20)
+	disabled.SetDisabled(nil)
+	cooling := selectorTestAccount("cooling.json", "pro", 20)
+	cooling.SetCooldown(time.Minute)
+	free := selectorTestAccount("free.json", "free", 20)
+
+	got := filterAvailable("gpt-5", []*Account{disabled, free, cooling})
+	if len(got) != 1 || got[0] != free {
+		t.Fatalf("filterAvailable() = %#v, want fallback free account", got)
+	}
+}
+
+func TestFallbackFilterPreservesModelBlockFiltering(t *testing.T) {
+	resetFreeAccountPolicy(t)
+
+	paid := selectorTestAccount("paid.json", "plus", 20)
+	free := selectorTestAccount("free.json", "free", 20)
+	now := time.Now()
+	for i := 0; i < modelAccessFailureThreshold; i++ {
+		paid.RecordModelAccessFailure("gpt-5.5", now.Add(time.Duration(i)*time.Second))
+	}
+
+	got := filterAvailable("gpt-5.5", []*Account{paid, free})
+	if len(got) != 1 || got[0] != free {
+		t.Fatalf("blocked model filterAvailable() = %#v, want fallback free account", got)
+	}
+
+	got = filterAvailable("gpt-5.4", []*Account{paid, free})
+	if len(got) != 1 || got[0] != paid {
+		t.Fatalf("other model filterAvailable() = %#v, want primary paid account", got)
+	}
+}
+
+func TestPickRecentlySuccessfulKeepsFreeInFallbackTier(t *testing.T) {
+	resetFreeAccountPolicy(t)
+
+	m := newPolicyTestManager(t)
+	paid := addPolicyTestAccount(m, "recent-paid@example.com")
+	paid.Token.PlanType = "plus"
+	paid.lastSuccessUnixMs.Store(time.Now().Add(-time.Minute).UnixMilli())
+	free := addPolicyTestAccount(m, "recent-free@example.com")
+	free.Token.PlanType = "free"
+	free.lastSuccessUnixMs.Store(time.Now().UnixMilli())
+
+	picked, err := m.PickRecentlySuccessful("gpt-5", nil)
+	if err != nil {
+		t.Fatalf("PickRecentlySuccessful() error = %v", err)
+	}
+	if picked != paid {
+		t.Fatalf("PickRecentlySuccessful() = %s, want paid primary tier", picked.GetEmail())
+	}
+}
+
+func TestPickRecentlySuccessfulOnlyKeepsFreeInFallbackTier(t *testing.T) {
+	resetFreeAccountPolicy(t)
+
+	m := newPolicyTestManager(t)
+	paid := addPolicyTestAccount(m, "recent-only-paid@example.com")
+	paid.Token.PlanType = "plus"
+	paid.lastSuccessUnixMs.Store(time.Now().Add(-time.Minute).UnixMilli())
+	free := addPolicyTestAccount(m, "recent-only-free@example.com")
+	free.Token.PlanType = "free"
+	free.lastSuccessUnixMs.Store(time.Now().UnixMilli())
+
+	picked, err := m.PickRecentlySuccessfulOnly("gpt-5", nil)
+	if err != nil {
+		t.Fatalf("PickRecentlySuccessfulOnly() error = %v", err)
+	}
+	if picked != paid {
+		t.Fatalf("PickRecentlySuccessfulOnly() = %s, want paid primary tier", picked.GetEmail())
+	}
+}

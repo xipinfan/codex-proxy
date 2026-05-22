@@ -122,6 +122,8 @@ type Config struct {
 	KeepaliveInterval       int      `yaml:"keepalive-interval"`
 	EmptyRetryMax           int      `yaml:"empty-retry-max"`
 	Selector                string   `yaml:"selector"`
+	FreeAccountRole         string   `yaml:"free-account-role"`
+	FreeAccountCutoff       int      `yaml:"free-account-cutoff"`
 	RefreshBatchSize        int      `yaml:"refresh-batch-size"`
 	Accounts                []string `yaml:"accounts"`
 	APIKeys                 []string `yaml:"api-keys"`
@@ -226,6 +228,8 @@ func LoadConfig(path string) (*Config, error) {
 		KeepaliveInterval:                  60,
 		EmptyRetryMax:                      2,
 		Selector:                           "round-robin",
+		FreeAccountRole:                    "fallback",
+		FreeAccountCutoff:                  70,
 		RefreshBatchSize:                   0,
 		EnableModelSuffixFast:              true,
 		EnableModelSuffix1M:                true,
@@ -451,6 +455,13 @@ func (c *Config) Sanitize() {
 	c.Selector = strings.TrimSpace(strings.ToLower(c.Selector))
 	if c.Selector != "quota-first" {
 		c.Selector = "round-robin"
+	}
+	c.FreeAccountRole = normalizeFreeAccountRole(c.FreeAccountRole)
+	if c.FreeAccountCutoff < 0 {
+		c.FreeAccountCutoff = 0
+	}
+	if c.FreeAccountCutoff > 100 {
+		c.FreeAccountCutoff = 100
 	}
 	c.RefreshHTTP429Action = strings.TrimSpace(c.RefreshHTTP429Action)
 	c.QuotaHTTP429Action = strings.TrimSpace(c.QuotaHTTP429Action)
@@ -694,5 +705,18 @@ func normalizeDBDriver(s string) string {
 		return "sqlite"
 	default:
 		return d
+	}
+}
+
+func normalizeFreeAccountRole(s string) string {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "shared":
+		return "shared"
+	case "disabled":
+		return "disabled"
+	case "fallback":
+		return "fallback"
+	default:
+		return "fallback"
 	}
 }
