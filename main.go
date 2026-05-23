@@ -44,6 +44,8 @@ const (
 	colorWhite  = "\033[97m"
 )
 
+const affinityTraceMarker = "response-continuation-info-v1"
+
 func main() {
 	/* 配置 logrus 彩色日志格式 */
 	log.SetFormatter(&log.TextFormatter{
@@ -138,6 +140,7 @@ func main() {
 	log.Infof("最大重试: %d 次", cfg.MaxRetry)
 	log.Infof("free 账号策略: role=%s cutoff=%d", cfg.FreeAccountRole, cfg.FreeAccountCutoff)
 	log.Infof("上游缓存指标日志: %v", cfg.LogCacheMetrics)
+	log.Infof("会话亲和: ttl=%d 秒, continuation=enabled, info-trace=%s", cfg.SessionAffinityTTLSec, affinityTraceMarker)
 	if cfg.UpstreamPoolAutoScale {
 		log.Infof("出站连接池(自适应): max-conns-per-host=%d max-idle-per-host=%d max-idle=%d tcp_nodelay=on",
 			cfg.MaxConnsPerHost, cfg.MaxIdleConnsPerHost, cfg.MaxIdleConns)
