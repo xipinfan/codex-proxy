@@ -531,7 +531,7 @@ func (s *CodexResponsesStream) PumpChatCompletion(w io.Writer, flush func()) err
 	}
 	s.account.RecordSuccess()
 	if state.ResponseID != "" && s.sessionKey != "" && s.bindResponseContinuationFn != nil {
-		log.Debugf("bind stream continuation response_id=%q session=%q account=%s", state.ResponseID, s.sessionKey, s.account.GetEmail())
+		log.Infof("bind stream continuation response_id=%q session=%q account=%s", state.ResponseID, s.sessionKey, s.account.GetEmail())
 		s.bindResponseContinuationFn(state.ResponseID, s.sessionKey, s.account)
 	}
 	firstChunkDur := time.Duration(0)
@@ -639,7 +639,7 @@ func (s *CodexResponsesStream) PumpRawSSE(w io.Writer, flush func()) error {
 						}
 						s.account.RecordSuccess()
 						if responseID != "" && s.sessionKey != "" && s.bindResponseContinuationFn != nil {
-							log.Debugf("bind raw stream continuation response_id=%q session=%q account=%s", responseID, s.sessionKey, s.account.GetEmail())
+							log.Infof("bind raw stream continuation response_id=%q session=%q account=%s", responseID, s.sessionKey, s.account.GetEmail())
 							s.bindResponseContinuationFn(responseID, s.sessionKey, s.account)
 						}
 						log.Infof("req summary responses-stream model=%s account=%s attempts=%d convert=%v upstream=%v total=%v", s.BaseModel, s.account.GetEmail(), s.Attempts, s.ConvertDur, s.SendDur, time.Since(streamStart))

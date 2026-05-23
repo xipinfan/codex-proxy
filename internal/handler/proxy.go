@@ -413,7 +413,7 @@ func (h *ProxyHandler) buildRequestRetryConfig(ctx *fasthttp.RequestCtx, body []
 	rc.BindSessionAccountFn = h.manager.BindSessionAccount
 	rc.EvictSessionAccountFn = h.manager.EvictSessionAccount
 	rc.BindResponseContinuationFn = h.manager.BindResponseContinuation
-	log.Debugf("responses affinity request path=%s explicit_session=%q previous_response_id=%q resolved_session=%q prompt_cache_key=%q",
+	log.Infof("responses affinity request path=%s explicit_session=%q previous_response_id=%q resolved_session=%q prompt_cache_key=%q",
 		string(ctx.Path()),
 		rc.ExplicitSessionID,
 		previousResponseID,
