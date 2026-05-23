@@ -1147,20 +1147,27 @@ func (m *Manager) EvictSessionAccount(sessionKey string, acc *Account) {
 func (m *Manager) PickSessionAccount(sessionKey, model string, excluded map[string]bool) (*Account, error) {
 	now := time.Now()
 	if accountKey, ok := m.sessionAffinity.Lookup(sessionKey, now); ok {
+		log.Debugf("session affinity hit session=%q model=%s bound_account=%q excluded=%v", sessionKey, model, accountKey, excluded[accountKey])
 		accounts := *m.accountsPtr.Load()
 		for _, acc := range accounts {
 			if acc.FilePath != accountKey {
 				continue
 			}
 			if excluded != nil && excluded[acc.FilePath] {
+				log.Debugf("session affinity skip excluded session=%q account=%s", sessionKey, acc.GetEmail())
 				return m.PickExcluding(model, excluded)
 			}
 			if accountPickableAt(now.UnixMilli(), model, acc) {
+				log.Debugf("session affinity reuse session=%q account=%s", sessionKey, acc.GetEmail())
 				return acc, nil
 			}
+			log.Debugf("session affinity evict unpickable session=%q account=%s", sessionKey, acc.GetEmail())
 			m.sessionAffinity.EvictIfBound(sessionKey, accountKey)
 			break
 		}
+	}
+	if strings.TrimSpace(sessionKey) != "" {
+		log.Debugf("session affinity miss session=%q model=%s", sessionKey, model)
 	}
 	return m.PickExcluding(model, excluded)
 }
@@ -1172,6 +1179,7 @@ func (m *Manager) BindResponseContinuation(responseID, sessionKey string, acc *A
 	now := time.Now()
 	m.sessionAffinity.Bind(sessionKey, acc.FilePath, now)
 	m.responseContinuation.Bind(responseID, sessionKey, acc.FilePath, now)
+	log.Debugf("response continuation bind response_id=%q session=%q account=%s", responseID, sessionKey, acc.GetEmail())
 }
 
 func (m *Manager) ResolveSessionKeyFromResponseID(responseID string) string {
@@ -1180,9 +1188,13 @@ func (m *Manager) ResolveSessionKeyFromResponseID(responseID string) string {
 	}
 	entry, ok := m.responseContinuation.Lookup(responseID, time.Now())
 	if !ok {
+		if strings.TrimSpace(responseID) != "" {
+			log.Debugf("response continuation miss response_id=%q", responseID)
+		}
 		return ""
 	}
 	m.sessionAffinity.Bind(entry.sessionKey, entry.accountKey, time.Now())
+	log.Debugf("response continuation hit response_id=%q session=%q account_key=%q", responseID, entry.sessionKey, entry.accountKey)
 	return entry.sessionKey
 }
 

@@ -403,8 +403,9 @@ func (h *ProxyHandler) buildRetryConfig() executor.RetryConfig {
 func (h *ProxyHandler) buildRequestRetryConfig(ctx *fasthttp.RequestCtx, body []byte) executor.RetryConfig {
 	rc := h.buildRetryConfig()
 	rc.ExplicitSessionID = strings.TrimSpace(string(ctx.Request.Header.Peek("X-Session-Id")))
+	previousResponseID := strings.TrimSpace(gjson.GetBytes(body, "previous_response_id").String())
 	if rc.ExplicitSessionID == "" {
-		if previousResponseID := strings.TrimSpace(gjson.GetBytes(body, "previous_response_id").String()); previousResponseID != "" {
+		if previousResponseID != "" {
 			rc.ResolvedSessionKey = h.manager.ResolveSessionKeyFromResponseID(previousResponseID)
 		}
 	}
@@ -412,6 +413,13 @@ func (h *ProxyHandler) buildRequestRetryConfig(ctx *fasthttp.RequestCtx, body []
 	rc.BindSessionAccountFn = h.manager.BindSessionAccount
 	rc.EvictSessionAccountFn = h.manager.EvictSessionAccount
 	rc.BindResponseContinuationFn = h.manager.BindResponseContinuation
+	log.Debugf("responses affinity request path=%s explicit_session=%q previous_response_id=%q resolved_session=%q prompt_cache_key=%q",
+		string(ctx.Path()),
+		rc.ExplicitSessionID,
+		previousResponseID,
+		rc.ResolvedSessionKey,
+		strings.TrimSpace(gjson.GetBytes(body, "prompt_cache_key").String()),
+	)
 	return rc
 }
 

@@ -390,6 +390,13 @@ func (e *Executor) sendWithRetry(ctx context.Context, rc RetryConfig, model stri
 		if sessionKey != "" {
 			codexBody = ensurePromptCacheKey(codexBody, sessionKey)
 		}
+		log.Debugf("affinity key selected model=%s explicit_session=%q resolved_session=%q prompt_cache_key=%q final_session=%q",
+			model,
+			rc.ExplicitSessionID,
+			rc.ResolvedSessionKey,
+			strings.TrimSpace(gjson.GetBytes(codexBody, "prompt_cache_key").String()),
+			sessionKey,
+		)
 	}
 	encoded, encErr := upstream.EncodeRequestBody(codexBody, e.upstreamRequestCompression)
 	if encErr != nil {
@@ -1026,6 +1033,7 @@ func (e *Executor) ExecuteResponsesNonStream(ctx context.Context, rc RetryConfig
 			if responseID := translator.ExtractResponseIDFromResponseObjectJSON(resp); responseID != "" && rc.BindResponseContinuationFn != nil {
 				sessionKey := deriveAffinitySessionKey(rc.ExplicitSessionID, rc.ResolvedSessionKey, codexBody)
 				if sessionKey != "" {
+					log.Debugf("bind nonstream continuation response_id=%q session=%q account=%s", responseID, sessionKey, account.GetEmail())
 					rc.BindResponseContinuationFn(responseID, sessionKey, account)
 				}
 			}
