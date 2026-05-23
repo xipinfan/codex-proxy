@@ -220,6 +220,14 @@ func TestDeriveAffinitySessionKeyUsesResolvedPreviousResponseSession(t *testing.
 	}
 }
 
+func TestDeriveAffinitySessionKeyPrefersResolvedSessionOverPromptCacheKey(t *testing.T) {
+	body := []byte(`{"instructions":"prefix","prompt_cache_key":"changing-cache-key","input":[{"type":"message","content":"new user turn"}]}`)
+
+	if got := deriveAffinitySessionKey("", "resolved-session", body); got != "resolved-session" {
+		t.Fatalf("deriveAffinitySessionKey() = %q, want resolved-session", got)
+	}
+}
+
 func TestDeriveSessionHintIsStableForBody(t *testing.T) {
 	body := []byte(`{"instructions":"keep a stable prefix","input":[{"type":"message","content":[{"type":"input_text","text":"hello"}]}]}`)
 

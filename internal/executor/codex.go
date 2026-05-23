@@ -1405,11 +1405,11 @@ func deriveAffinitySessionKey(explicit, resolved string, body []byte) string {
 	if explicit = strings.TrimSpace(explicit); explicit != "" {
 		return explicit
 	}
-	if promptCacheKey := strings.TrimSpace(gjson.GetBytes(body, "prompt_cache_key").String()); promptCacheKey != "" {
-		return promptCacheKey
-	}
 	if resolved = strings.TrimSpace(resolved); resolved != "" {
 		return resolved
+	}
+	if promptCacheKey := strings.TrimSpace(gjson.GetBytes(body, "prompt_cache_key").String()); promptCacheKey != "" {
+		return promptCacheKey
 	}
 	return deriveSessionHint(body)
 }
