@@ -13,6 +13,7 @@ import (
 	"codex-proxy/internal/upstream"
 
 	"github.com/klauspost/compress/zstd"
+	"github.com/tidwall/gjson"
 )
 
 func TestConcurrentRetryAfter429DoesNotIgnoreCooldownAccounts(t *testing.T) {
@@ -194,7 +195,7 @@ func TestSendWithRetryCompressesLargeUpstreamBody(t *testing.T) {
 func TestDeriveAffinitySessionKeyPrefersExplicitHeader(t *testing.T) {
 	body := []byte(`{"instructions":"keep a stable prefix","input":[{"type":"message","content":[{"type":"input_text","text":"hello"}]}]}`)
 
-	if got := deriveAffinitySessionKey(" explicit-session ", body); got != "explicit-session" {
+	if got := deriveAffinitySessionKey(" explicit-session ", "", body); got != "explicit-session" {
 		t.Fatalf("deriveAffinitySessionKey() = %q, want explicit-session", got)
 	}
 }
@@ -202,12 +203,20 @@ func TestDeriveAffinitySessionKeyPrefersExplicitHeader(t *testing.T) {
 func TestDeriveAffinitySessionKeyIgnoresAccountIdentity(t *testing.T) {
 	body := []byte(`{"instructions":"keep a stable prefix","input":[{"type":"message","content":[{"type":"input_text","text":"hello"}]}]}`)
 
-	got := deriveAffinitySessionKey("", body)
+	got := deriveAffinitySessionKey("", "", body)
 	if got == "" {
 		t.Fatal("deriveAffinitySessionKey() returned empty key")
 	}
-	if got != deriveAffinitySessionKey("", body) {
+	if got != deriveAffinitySessionKey("", "", body) {
 		t.Fatal("deriveAffinitySessionKey() changed for the same request body")
+	}
+}
+
+func TestDeriveAffinitySessionKeyUsesResolvedPreviousResponseSession(t *testing.T) {
+	body := []byte(`{"instructions":"prefix","input":[{"type":"message","content":"new user turn"}]}`)
+
+	if got := deriveAffinitySessionKey("", "resolved-session", body); got != "resolved-session" {
+		t.Fatalf("deriveAffinitySessionKey() = %q, want resolved-session", got)
 	}
 }
 
@@ -388,6 +397,52 @@ func TestSendWithRetryEvictsFailedBoundAccountBeforeRetry(t *testing.T) {
 	}
 	if len(evicted) == 0 || evicted[0] != "session-a:first.json" {
 		t.Fatalf("evicted = %v, want first bound account eviction", evicted)
+	}
+}
+
+func TestExecuteResponsesNonStreamBindsResponseContinuation(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"id":"resp_123","object":"response","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}`))
+	}))
+	defer upstream.Close()
+
+	acc := &auth.Account{
+		FilePath: "sticky.json",
+		Token: auth.TokenData{
+			Email:       "sticky@example.com",
+			AccessToken: "access-token",
+		},
+		Status: auth.StatusActive,
+	}
+	acc.SetActive()
+
+	var boundResponseID string
+	var boundSession string
+	executor := &Executor{
+		baseURL:    upstream.URL,
+		httpClient: upstream.Client(),
+	}
+	rc := RetryConfig{
+		ResolvedSessionKey: "resolved-session",
+		PickFn: func(model string, excluded map[string]bool) (*auth.Account, error) {
+			return acc, nil
+		},
+		BindResponseContinuationFn: func(responseID, sessionKey string, acc *auth.Account) {
+			boundResponseID = responseID
+			boundSession = sessionKey
+		},
+	}
+
+	resp, err := executor.ExecuteResponsesNonStream(context.Background(), rc, []byte(`{"model":"gpt-5.5","input":"hello"}`), "gpt-5.5")
+	if err != nil {
+		t.Fatalf("ExecuteResponsesNonStream() error = %v", err)
+	}
+	if gjson.GetBytes(resp, "id").String() != "resp_123" {
+		t.Fatalf("response id = %q, want resp_123", gjson.GetBytes(resp, "id").String())
+	}
+	if boundResponseID != "resp_123" || boundSession != "resolved-session" {
+		t.Fatalf("bound continuation = (%q, %q), want (resp_123, resolved-session)", boundResponseID, boundSession)
 	}
 }
 

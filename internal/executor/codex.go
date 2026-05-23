@@ -188,13 +188,14 @@ func (e *Executor) SetLogCacheMetrics(enabled bool) {
  * @field LastAttemptPickFn - 最后一轮选号专用（与 max-retry 最后一格对齐）
  */
 type RetryConfig struct {
-	PickFn                func(model string, excluded map[string]bool) (*auth.Account, error)
-	PickSessionAccountFn  func(sessionKey, model string, excluded map[string]bool) (*auth.Account, error)
-	BindSessionAccountFn  func(sessionKey string, acc *auth.Account)
-	EvictSessionAccountFn func(sessionKey string, acc *auth.Account)
-	HealthyPickFn         func(model string, excluded map[string]bool) (*auth.Account, error)
-	HealthyPickMinAttempt int /* 从第几次尝试起（0-based）改用 HealthyPickFn；0 表示主循环中不用；通常为 max-retry-1 */
-	FallbackRecentPickFn  func(model string, excluded map[string]bool) (*auth.Account, error)
+	PickFn                     func(model string, excluded map[string]bool) (*auth.Account, error)
+	PickSessionAccountFn       func(sessionKey, model string, excluded map[string]bool) (*auth.Account, error)
+	BindSessionAccountFn       func(sessionKey string, acc *auth.Account)
+	EvictSessionAccountFn      func(sessionKey string, acc *auth.Account)
+	BindResponseContinuationFn func(responseID, sessionKey string, acc *auth.Account)
+	HealthyPickFn              func(model string, excluded map[string]bool) (*auth.Account, error)
+	HealthyPickMinAttempt      int /* 从第几次尝试起（0-based）改用 HealthyPickFn；0 表示主循环中不用；通常为 max-retry-1 */
+	FallbackRecentPickFn       func(model string, excluded map[string]bool) (*auth.Account, error)
 	/* LastAttemptPickFn 最后一轮选号专用；宜只做快速选号，避免阻塞 OAuth */
 	LastAttemptPickFn func(ctx context.Context, model string, excluded map[string]bool) (*auth.Account, error)
 	/* On401Fn 返回 true 则同号立即重发上游；false 则换号。对话场景多为 false + 异步刷新失效号 */
@@ -218,6 +219,8 @@ type RetryConfig struct {
 	SkipModelAccessClearOnHTTP2xx bool
 	/* ExplicitSessionID 为入站显式传入的稳定会话 ID */
 	ExplicitSessionID string
+	/* ResolvedSessionKey 为基于 previous_response_id 等已有上下文恢复出的稳定会话 Key */
+	ResolvedSessionKey string
 }
 
 /**
@@ -383,7 +386,7 @@ func IsRetryableStatus(code int) bool {
 func (e *Executor) sendWithRetry(ctx context.Context, rc RetryConfig, model string, apiURL string, codexBody []byte, stream bool) (*http.Response, *auth.Account, int, error) {
 	sessionKey := ""
 	if shouldUseSessionAffinity(rc) {
-		sessionKey = deriveAffinitySessionKey(rc.ExplicitSessionID, codexBody)
+		sessionKey = deriveAffinitySessionKey(rc.ExplicitSessionID, rc.ResolvedSessionKey, codexBody)
 		if sessionKey != "" {
 			codexBody = ensurePromptCacheKey(codexBody, sessionKey)
 		}
@@ -683,7 +686,7 @@ func (e *Executor) concurrentRetryAfter429(
 ) (*http.Response, *auth.Account, []*auth.Account, error) {
 	sessionHint := ""
 	if shouldUseSessionAffinity(rc) {
-		sessionHint = deriveAffinitySessionKey(rc.ExplicitSessionID, codexBody)
+		sessionHint = deriveAffinitySessionKey(rc.ExplicitSessionID, rc.ResolvedSessionKey, codexBody)
 	}
 	return e.concurrentRetryAfter429WithHeaders(parentCtx, rc, model, apiURL, codexBody, sessionHint, stream, excluded, nil)
 }
@@ -1020,6 +1023,12 @@ func (e *Executor) ExecuteResponsesNonStream(ctx context.Context, rc RetryConfig
 				account.RecordUsage(usage.InputTokens, usage.OutputTokens, usage.TotalTokens)
 			}
 			account.RecordSuccess()
+			if responseID := translator.ExtractResponseIDFromResponseObjectJSON(resp); responseID != "" && rc.BindResponseContinuationFn != nil {
+				sessionKey := deriveAffinitySessionKey(rc.ExplicitSessionID, rc.ResolvedSessionKey, codexBody)
+				if sessionKey != "" {
+					rc.BindResponseContinuationFn(responseID, sessionKey, account)
+				}
+			}
 			log.Infof("req summary responses-nonstream model=%s account=%s attempts=%d convert=%v upstream=%v total=%v", baseModel, account.GetEmail(), attempts, convertDur, sendDur, time.Since(startTotal))
 			return resp, nil
 		}
@@ -1392,12 +1401,15 @@ func applyCodexHeaders(r *http.Request, account *auth.Account, stream bool, sess
 	}
 }
 
-func deriveAffinitySessionKey(explicit string, body []byte) string {
+func deriveAffinitySessionKey(explicit, resolved string, body []byte) string {
 	if explicit = strings.TrimSpace(explicit); explicit != "" {
 		return explicit
 	}
 	if promptCacheKey := strings.TrimSpace(gjson.GetBytes(body, "prompt_cache_key").String()); promptCacheKey != "" {
 		return promptCacheKey
+	}
+	if resolved = strings.TrimSpace(resolved); resolved != "" {
+		return resolved
 	}
 	return deriveSessionHint(body)
 }
@@ -1418,6 +1430,7 @@ func ensurePromptCacheKey(body []byte, sessionKey string) []byte {
 
 func shouldUseSessionAffinity(rc RetryConfig) bool {
 	return strings.TrimSpace(rc.ExplicitSessionID) != "" ||
+		strings.TrimSpace(rc.ResolvedSessionKey) != "" ||
 		rc.PickSessionAccountFn != nil ||
 		rc.BindSessionAccountFn != nil ||
 		rc.EvictSessionAccountFn != nil

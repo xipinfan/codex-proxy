@@ -40,6 +40,21 @@ func TestSessionAffinityStoreEvictOnlyMatchingBinding(t *testing.T) {
 	}
 }
 
+func TestResponseContinuationStoreBindLookupAndExpiry(t *testing.T) {
+	now := time.Date(2026, 5, 22, 0, 0, 0, 0, time.UTC)
+	store := newResponseContinuationStore(30 * time.Minute)
+
+	store.Bind("resp_1", "session-a", "account-a", now)
+
+	got, ok := store.Lookup("resp_1", now.Add(time.Minute))
+	if !ok || got.sessionKey != "session-a" || got.accountKey != "account-a" {
+		t.Fatalf("Lookup() = (%+v, %v), want session-a/account-a true", got, ok)
+	}
+	if _, ok := store.Lookup("resp_1", now.Add(31*time.Minute)); ok {
+		t.Fatal("expired continuation should miss")
+	}
+}
+
 func TestManagerPickSessionAccountReusesSuccessfulBinding(t *testing.T) {
 	m := newPolicyTestManager(t)
 	m.sessionAffinity = newSessionAffinityStore(time.Hour)
@@ -90,5 +105,21 @@ func TestManagerPickSessionAccountEvictsUnavailableBinding(t *testing.T) {
 	}
 	if got, ok := m.sessionAffinity.Lookup("session-a", time.Now()); ok && got == first.FilePath {
 		t.Fatal("stale binding should be evicted")
+	}
+}
+
+func TestManagerResolveSessionKeyFromResponseIDRebindsAffinity(t *testing.T) {
+	m := newPolicyTestManager(t)
+	m.sessionAffinity = newSessionAffinityStore(time.Hour)
+	m.responseContinuation = newResponseContinuationStore(time.Hour)
+	first := addPolicyTestAccount(m, "reply@example.com")
+
+	m.BindResponseContinuation("resp_123", "session-a", first)
+
+	if got := m.ResolveSessionKeyFromResponseID("resp_123"); got != "session-a" {
+		t.Fatalf("ResolveSessionKeyFromResponseID() = %q, want session-a", got)
+	}
+	if picked, err := m.PickSessionAccount("session-a", "gpt-5.5", nil); err != nil || picked != first {
+		t.Fatalf("PickSessionAccount() = (%v, %v), want sticky bound account", picked, err)
 	}
 }

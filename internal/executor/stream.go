@@ -23,6 +23,7 @@ import (
 type CodexResponsesStream struct {
 	body         io.ReadCloser
 	account      *auth.Account
+	sessionKey   string
 	Attempts     int
 	BaseModel    string
 	ConvertDur   time.Duration
@@ -43,7 +44,8 @@ type CodexResponsesStream struct {
 	/* debugUpstreamStream 为 true 时 Info 打印上游原始 SSE（配置 debug-upstream-stream） */
 	debugUpstreamStream bool
 	/* estimatedPromptTokens 为缺少 usage 时输入 token 的估算兜底。 */
-	estimatedPromptTokens int64
+	estimatedPromptTokens      int64
+	bindResponseContinuationFn func(responseID, sessionKey string, acc *auth.Account)
 }
 
 /* Body 返回当前上游响应体，供外部 pump 读取 SSE */
@@ -248,21 +250,29 @@ func (e *Executor) OpenCodexResponsesStream(ctx context.Context, rc RetryConfig,
 	if err != nil {
 		return nil, err
 	}
+	sessionKey := ""
+	if shouldUseSessionAffinity(rc) {
+		body, baseModel, isImage := thinking.ApplyThinking(requestBody, model)
+		codexBody := translator.ConvertOpenAIRequestToCodex(baseModel, body, true, isImage)
+		sessionKey = deriveAffinitySessionKey(rc.ExplicitSessionID, rc.ResolvedSessionKey, codexBody)
+	}
 	includeUsage := gjson.GetBytes(requestBody, "stream_options.include_usage").Bool()
 	s := &CodexResponsesStream{
-		body:                  bodyRC,
-		account:               meta.Account,
-		Attempts:              meta.Attempts,
-		BaseModel:             meta.BaseModel,
-		ConvertDur:            meta.ConvertDur,
-		SendDur:               meta.SendDur,
-		reverseTools:          meta.ReverseTools,
-		IncludeUsage:          includeUsage,
-		LogCacheMetrics:       e.logCacheMetrics,
-		pumpRounds:            codexStreamPumpRounds(rc.MaxRetry),
-		reopenExcluded:        make(map[string]bool),
-		debugUpstreamStream:   rc.DebugUpstreamStream,
-		estimatedPromptTokens: estimatePromptTokensFromRequest(requestBody, meta.BaseModel),
+		body:                       bodyRC,
+		account:                    meta.Account,
+		sessionKey:                 sessionKey,
+		Attempts:                   meta.Attempts,
+		BaseModel:                  meta.BaseModel,
+		ConvertDur:                 meta.ConvertDur,
+		SendDur:                    meta.SendDur,
+		reverseTools:               meta.ReverseTools,
+		IncludeUsage:               includeUsage,
+		LogCacheMetrics:            e.logCacheMetrics,
+		pumpRounds:                 codexStreamPumpRounds(rc.MaxRetry),
+		reopenExcluded:             make(map[string]bool),
+		debugUpstreamStream:        rc.DebugUpstreamStream,
+		estimatedPromptTokens:      estimatePromptTokensFromRequest(requestBody, meta.BaseModel),
+		bindResponseContinuationFn: rc.BindResponseContinuationFn,
 	}
 	s.reopenFn = func(ctx context.Context) (io.ReadCloser, CodexResponsesMeta, error) {
 		rcEx := MergeRetryConfigExcluded(rc, s.reopenExcluded)
@@ -520,6 +530,9 @@ func (s *CodexResponsesStream) PumpChatCompletion(w io.Writer, flush func()) err
 		log.Warnf("req summary stream all usage zero, skipping RecordUsage model=%s account=%s", s.BaseModel, s.account.GetEmail())
 	}
 	s.account.RecordSuccess()
+	if state.ResponseID != "" && s.sessionKey != "" && s.bindResponseContinuationFn != nil {
+		s.bindResponseContinuationFn(state.ResponseID, s.sessionKey, s.account)
+	}
 	firstChunkDur := time.Duration(0)
 	completedDur := time.Duration(0)
 	tailAfterCompleted := time.Duration(0)
@@ -563,6 +576,7 @@ func (s *CodexResponsesStream) PumpRawSSE(w io.Writer, flush func()) error {
 	var lineBuf []byte
 	usage := translator.ResponseUsage{}
 	outputTextAcc := translator.NewResponseOutputTextAccumulator()
+	responseID := ""
 	var pumpErr error
 	pumpCtx := context.Background()
 
@@ -581,6 +595,9 @@ func (s *CodexResponsesStream) PumpRawSSE(w io.Writer, flush func()) error {
 					lineBuf = lineBuf[idx+1:]
 					if extracted := translator.ExtractResponseUsageFromSSELine(line); extracted.FoundCompleted {
 						usage = extracted
+					}
+					if responseID == "" {
+						responseID = translator.ExtractResponseIDFromSSELine(line)
 					}
 					outputTextAcc.AddSSELine(line)
 				}
@@ -605,6 +622,9 @@ func (s *CodexResponsesStream) PumpRawSSE(w io.Writer, flush func()) error {
 						if extracted := translator.ExtractResponseUsageFromSSELine(lineBuf); extracted.FoundCompleted {
 							usage = extracted
 						}
+						if responseID == "" {
+							responseID = translator.ExtractResponseIDFromSSELine(lineBuf)
+						}
 						outputTextAcc.AddSSELine(lineBuf)
 						lineBuf = nil
 					}
@@ -617,6 +637,9 @@ func (s *CodexResponsesStream) PumpRawSSE(w io.Writer, flush func()) error {
 							s.account.RecordUsage(usage.InputTokens, usage.OutputTokens, usage.TotalTokens)
 						}
 						s.account.RecordSuccess()
+						if responseID != "" && s.sessionKey != "" && s.bindResponseContinuationFn != nil {
+							s.bindResponseContinuationFn(responseID, s.sessionKey, s.account)
+						}
 						log.Infof("req summary responses-stream model=%s account=%s attempts=%d convert=%v upstream=%v total=%v", s.BaseModel, s.account.GetEmail(), s.Attempts, s.ConvertDur, s.SendDur, time.Since(streamStart))
 						return nil
 					}

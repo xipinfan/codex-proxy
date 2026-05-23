@@ -82,6 +82,28 @@ func ExtractResponseUsageFromResponseObjectJSON(rawJSON []byte) ResponseUsage {
 	return out
 }
 
+func ExtractResponseIDFromSSELine(rawLine []byte) string {
+	if !bytes.HasPrefix(bytes.TrimSpace(rawLine), dataPrefix) {
+		return ""
+	}
+	rawJSON := bytes.TrimSpace(bytes.TrimSpace(rawLine)[5:])
+	if len(rawJSON) == 0 {
+		return ""
+	}
+	root := gjson.ParseBytes(rawJSON)
+	switch root.Get("type").String() {
+	case "response.created", "response.completed":
+		if id := root.Get("response.id").String(); id != "" {
+			return id
+		}
+	}
+	return ""
+}
+
+func ExtractResponseIDFromResponseObjectJSON(rawJSON []byte) string {
+	return gjson.GetBytes(rawJSON, "id").String()
+}
+
 func ExtractResponseOutputTextFromSSELine(rawLine []byte) string {
 	if !bytes.HasPrefix(bytes.TrimSpace(rawLine), dataPrefix) {
 		return ""

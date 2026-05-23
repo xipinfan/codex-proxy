@@ -113,6 +113,7 @@ type Manager struct {
 	/* disableAuth401Remove true 时 401 刷新失败不删号/不禁用，只冷却 */
 	disableAuth401Remove bool
 	sessionAffinity      *sessionAffinityStore
+	responseContinuation *responseContinuationStore
 }
 
 /**
@@ -177,6 +178,7 @@ func NewManager(authDir string, db *sql.DB, proxyURL string, refreshInterval int
 		ttl = opts.SessionAffinityTTL
 	}
 	m.sessionAffinity = newSessionAffinityStore(ttl)
+	m.responseContinuation = newResponseContinuationStore(ttl)
 	m.refreshHTTPPolicy = mergeRefreshHTTPPolicies(opts)
 	m.quotaHTTPPolicy = mergeQuotaHTTPPolicies(opts)
 	empty := make([]*Account, 0)
@@ -1161,6 +1163,27 @@ func (m *Manager) PickSessionAccount(sessionKey, model string, excluded map[stri
 		}
 	}
 	return m.PickExcluding(model, excluded)
+}
+
+func (m *Manager) BindResponseContinuation(responseID, sessionKey string, acc *Account) {
+	if m == nil || acc == nil {
+		return
+	}
+	now := time.Now()
+	m.sessionAffinity.Bind(sessionKey, acc.FilePath, now)
+	m.responseContinuation.Bind(responseID, sessionKey, acc.FilePath, now)
+}
+
+func (m *Manager) ResolveSessionKeyFromResponseID(responseID string) string {
+	if m == nil {
+		return ""
+	}
+	entry, ok := m.responseContinuation.Lookup(responseID, time.Now())
+	if !ok {
+		return ""
+	}
+	m.sessionAffinity.Bind(entry.sessionKey, entry.accountKey, time.Now())
+	return entry.sessionKey
 }
 
 /**
