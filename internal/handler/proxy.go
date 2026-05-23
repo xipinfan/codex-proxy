@@ -1027,7 +1027,7 @@ func (h *ProxyHandler) handleResponses(ctx *fasthttp.RequestCtx) {
 
 	log.Debugf("收到 Responses 请求: model=%s, stream=%v", model, stream)
 
-	rc := h.buildRetryConfig()
+	rc := h.buildRequestRetryConfig(ctx, body)
 
 	if stream {
 		/* 头与状态在 StreamWriter 外发送；Open+Pump 在 Writer 内完成，connection closed 等在体尚无字节时可内部多轮全量重连 */
